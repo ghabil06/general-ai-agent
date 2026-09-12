@@ -1,0 +1,19 @@
+node_modules/
+.npm/
+
+# package-lock.json IS committed: CI runs `npm ci`, which requires it.
+
+# promptfoo local artefacts
+results.json
+results.csv
+results.html
+results.xml
+naive-results.json
+oracle-results.json
+eval-results.json
+.promptfoo/
+
+# local secrets
+.env
+.env.*
+!.env.example

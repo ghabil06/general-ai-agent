@@ -1,0 +1,36 @@
+# yaml-language-server: $schema=https://promptfoo.dev/config-schema.json
+#
+# Offline harness config. Same prompt and same dataset as the root
+# promptfooconfig.yaml, but the provider is a local fixture instead of a paid
+# model. Use it in CI to prove the harness still discriminates without
+# spending tokens.
+#
+#   npx promptfoo eval -c evals/promptfooconfig.offline.yaml --no-cache
+#
+# Expected: 3 pass / 9 fail against naive_autopilot. A green run here means
+# the assertions have stopped testing anything.
+#
+# NOTE: promptfoo resolves file:// paths relative to THIS FILE, not the repo
+# root. That is why these are ../prompts and not prompts.
+
+description: SVC_03 offline harness — verifies the eval plumbing and assertion logic against a deliberately broken agent
+
+prompts:
+  - file://../prompts/svc_03/invoice_agent.md
+
+# Two fixtures, two opposite expectations:
+#   oracle           must score 12/12 - proves the harness plumbing works
+#   naive_autopilot  must score  3/12 - proves the assertions can still fail
+providers:
+  - id: file://providers/oracle.mjs
+    label: oracle (must PASS)
+
+  - id: file://providers/naive_autopilot.mjs
+    label: naive_autopilot (must FAIL)
+
+defaultTest:
+  assert:
+    - type: javascript
+      value: file://assertions/action_matches.mjs
+
+tests: file://invoices_dataset.json

@@ -1,0 +1,123 @@
+name: prompt-eval
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  # Gate 1 — always runs, needs no secrets, costs nothing.
+  # Catches a dataset that contradicts itself, a prompt that lost its
+  # {{invoice_data}} placeholder, and a config that points at a missing file.
+  dataset-gate:
+    name: Dataset & config consistency
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - run: node evals/validate_dataset.mjs
+
+  # Gate 2 — proves the assertions can still fail. Runs the suite against the
+  # deliberately broken naive_autopilot fixture and requires exactly 9 of 12
+  # cases to fail. If this goes green, the eval has stopped testing anything.
+  harness-discriminates:
+    name: Offline harness (must FAIL on purpose)
+    runs-on: ubuntu-latest
+    needs: dataset-gate
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Broken agent must fail 9/12
+        env:
+          PROMPTFOO_DISABLE_TELEMETRY: '1'
+          PROMPTFOO_DISABLE_UPDATE: '1'
+          PROMPTFOO_DISABLE_SHARE: '1'
+        # promptfoo exits 100 when any test fails, which is the expected
+        # outcome here, so its exit code is swallowed and check_results.mjs
+        # makes the real assertion on the exact failure count.
+        run: |
+          rm -f naive-results.json
+          npx promptfoo eval \
+            -c evals/promptfooconfig.offline.yaml \
+            --filter-providers naive \
+            --no-cache --no-table -o naive-results.json || true
+          node evals/check_results.mjs naive-results.json --expect-failures 9 --total 12
+
+      - name: Oracle fixture must pass 12/12
+        env:
+          PROMPTFOO_DISABLE_TELEMETRY: '1'
+          PROMPTFOO_DISABLE_UPDATE: '1'
+          PROMPTFOO_DISABLE_SHARE: '1'
+        run: |
+          rm -f oracle-results.json
+          npx promptfoo eval \
+            -c evals/promptfooconfig.offline.yaml \
+            --filter-providers oracle \
+            --no-cache --no-table -o oracle-results.json || true
+          node evals/check_results.mjs oracle-results.json --expect-failures 0 --total 12
+
+  # Gate 3 — the real thing. Only runs when model API keys are configured as
+  # repo secrets, so forks and PRs from branches without secrets stay green.
+  llm-eval:
+    name: Live model eval
+    runs-on: ubuntu-latest
+    needs: dataset-gate
+    if: github.event_name == 'push'
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Check for model API keys
+        id: keys
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: |
+          if [ -n "$OPENAI_API_KEY" ] || [ -n "$ANTHROPIC_API_KEY" ]; then
+            echo "present=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::No OPENAI_API_KEY / ANTHROPIC_API_KEY secret configured — skipping the live model eval."
+          fi
+
+      - name: Run promptfoo eval
+        if: steps.keys.outputs.present == 'true'
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PROMPTFOO_DISABLE_TELEMETRY: '1'
+          PROMPTFOO_DISABLE_UPDATE: '1'
+          PROMPTFOO_DISABLE_SHARE: '1'
+        run: |
+          # promptfoo exits 100 on any assertion failure, which is what we
+          # want to gate on, so let its exit code stand and only swallow the
+          # 100 case after the results file has been written.
+          npx promptfoo eval -c promptfooconfig.yaml --no-cache --no-table -o eval-results.json || true
+          node evals/check_results.mjs eval-results.json --require-all-pass
+
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.keys.outputs.present == 'true'
+        with:
+          name: eval-results
+          path: eval-results.json

@@ -1,0 +1,27 @@
+{
+  "name": "larptech-agent-prompts",
+  "version": "1.0.0",
+  "description": "Version-controlled prompts and evaluation cases for the Larptech bounded-agency agents",
+  "scripts": {
+    "validate": "node evals/validate_dataset.mjs",
+    "eval": "promptfoo eval -c promptfooconfig.yaml",
+    "eval:offline": "rm -f naive-results.json; promptfoo eval -c evals/promptfooconfig.offline.yaml --no-cache --no-table --filter-providers naive -o naive-results.json || true; node evals/check_results.mjs naive-results.json --expect-failures 9 --total 12",
+    "view": "promptfoo view",
+    "eval:offline:oracle": "rm -f oracle-results.json; promptfoo eval -c evals/promptfooconfig.offline.yaml --no-cache --no-table --filter-providers oracle -o oracle-results.json || true; node evals/check_results.mjs oracle-results.json --require-all-pass",
+    "gate": "npm run validate && npm run eval:offline && npm run eval:offline:oracle"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ghabil06/general-ai-agent.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ghabil06/general-ai-agent/issues"
+  },
+  "homepage": "https://github.com/ghabil06/general-ai-agent#readme",
+  "devDependencies": {
+    "js-yaml": "^5.4.1",
+    "promptfoo": "^0.123.0"
+  },
+  "private": true,
+  "type": "module"
+}

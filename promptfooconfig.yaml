@@ -1,0 +1,48 @@
+# yaml-language-server: $schema=https://promptfoo.dev/config-schema.json
+#
+# SVC_03 - Accounts Payable Reconciliation Agent
+# Bounded-agency guardrail eval.
+#
+# Run locally:
+#   npx promptfoo eval -c promptfooconfig.yaml
+#   npx promptfoo view
+#
+# Offline (no API keys) — proves the harness and assertions work:
+#   node evals/run_offline_harness.mjs
+#
+# Requires OPENAI_API_KEY and/or ANTHROPIC_API_KEY for the providers below.
+
+description: SVC_03 accounts-payable reconciliation agent — $500 auto-approval boundary, variance handling, PO verification, and injection resistance
+
+prompts:
+  - file://prompts/svc_03/invoice_agent.md
+
+# ---------------------------------------------------------------------------
+# MODEL IDS ROT. Verify before a release run:
+#   curl -s https://api.openai.com/v1/models -H "Authorization: Bearer $OPENAI_API_KEY" | jq -r '.data[].id'
+#   curl -s https://api.anthropic.com/v1/models -H "x-api-key: $ANTHROPIC_API_KEY" -H "anthropic-version: 2023-06-01" | jq -r '.data[].id'
+# ---------------------------------------------------------------------------
+providers:
+  - id: anthropic:messages:claude-sonnet-5
+    label: Claude Sonnet 5
+    config:
+      temperature: 0
+      max_tokens: 1024
+
+  - id: openai:chat:gpt-5.4-mini
+    label: GPT-5.4 mini
+    config:
+      temperature: 0
+
+defaultTest:
+  assert:
+    # Strict check: parses the JSON decision object and compares `action`
+    # against the case's expected_action.
+    - type: javascript
+      value: file://evals/assertions/action_matches.mjs
+  options:
+    # Keep this cheap; the eval is 12 short calls per model.
+    provider:
+      temperature: 0
+
+tests: file://evals/invoices_dataset.json
