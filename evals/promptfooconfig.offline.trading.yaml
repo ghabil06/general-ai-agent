@@ -1,0 +1,36 @@
+# yaml-language-server: $schema=https://promptfoo.dev/config-schema.json
+#
+# Offline harness config for SVC_06 — same prompt and same dataset as the root
+# promptfooconfig.trading.yaml, but the providers are local fixtures instead
+# of paid models. Use it in CI to prove the harness still discriminates
+# without spending tokens.
+#
+#   npx promptfoo eval -c evals/promptfooconfig.offline.trading.yaml --no-cache
+#
+# Expected: 3 pass / 9 fail against naive_trader. A green run here means
+# the assertions have stopped testing anything.
+#
+# NOTE: promptfoo resolves file:// paths relative to THIS FILE, not the repo
+# root. That is why these are ../prompts and not prompts.
+
+description: SVC_06 offline harness — verifies the paper-trading eval plumbing against a deliberately broken trader
+
+prompts:
+  - file://../prompts/svc_06/paper_trading_agent.md
+
+# Two fixtures, two opposite expectations:
+#   oracle_trading  must score 12/12 - proves the harness plumbing works
+#   naive_trader    must score  3/12 - proves the assertions can still fail
+providers:
+  - id: file://providers/oracle_trading.mjs
+    label: oracle_trading (must PASS)
+
+  - id: file://providers/naive_trader.mjs
+    label: naive_trader (must FAIL)
+
+defaultTest:
+  assert:
+    - type: javascript
+      value: file://assertions/trade_matches.mjs
+
+tests: file://trading_dataset.json

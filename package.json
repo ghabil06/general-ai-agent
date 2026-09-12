@@ -5,17 +5,21 @@
   "scripts": {
     "validate": "node evals/validate_dataset.mjs",
     "validate:security": "node evals/validate_security_dataset.mjs",
+    "validate:trading": "node evals/validate_trading_dataset.mjs",
     "eval": "promptfoo eval -c promptfooconfig.yaml",
     "eval:security": "promptfoo eval -c promptfooconfig.security.yaml",
+    "eval:trading": "promptfoo eval -c promptfooconfig.trading.yaml",
     "eval:offline": "rm -f naive-results.json; promptfoo eval -c evals/promptfooconfig.offline.yaml --no-cache --no-table --filter-providers naive -o naive-results.json || true; node evals/check_results.mjs naive-results.json --expect-failures 9 --total 12",
     "eval:offline:oracle": "rm -f oracle-results.json; promptfoo eval -c evals/promptfooconfig.offline.yaml --no-cache --no-table --filter-providers oracle -o oracle-results.json || true; node evals/check_results.mjs oracle-results.json --require-all-pass",
     "eval:offline:security": "rm -f naive-security-results.json; promptfoo eval -c evals/promptfooconfig.offline.security.yaml --no-cache --no-table --filter-providers naive_analyst -o naive-security-results.json || true; node evals/check_results.mjs naive-security-results.json --expect-failures 7 --total 12",
     "eval:offline:security:oracle": "rm -f oracle-security-results.json; promptfoo eval -c evals/promptfooconfig.offline.security.yaml --no-cache --no-table --filter-providers oracle_security -o oracle-security-results.json || true; node evals/check_results.mjs oracle-security-results.json --require-all-pass",
+    "eval:offline:trading": "rm -f naive-trading-results.json; promptfoo eval -c evals/promptfooconfig.offline.trading.yaml --no-cache --no-table --filter-providers naive_trader -o naive-trading-results.json || true; node evals/check_results.mjs naive-trading-results.json --expect-failures 9 --total 12",
+    "eval:offline:trading:oracle": "rm -f oracle-trading-results.json; promptfoo eval -c evals/promptfooconfig.offline.trading.yaml --no-cache --no-table --filter-providers oracle_trading -o oracle-trading-results.json || true; node evals/check_results.mjs oracle-trading-results.json --require-all-pass",
     "lint:n8n": "node n8n_exports/validate_workflow.mjs",
     "test:n8n": "node n8n_exports/test_parse_nodes.mjs",
     "test:replay": "node n8n_exports/replay_history.mjs --dry-run --file n8n_exports/replay_sample.jsonl",
     "view": "promptfoo view",
-    "gate": "npm run validate && npm run validate:security && npm run eval:offline && npm run eval:offline:oracle && npm run eval:offline:security && npm run eval:offline:security:oracle && npm run lint:n8n && npm run test:n8n && npm run test:replay"
+    "gate": "npm run validate && npm run validate:security && npm run validate:trading && npm run eval:offline && npm run eval:offline:oracle && npm run eval:offline:security && npm run eval:offline:security:oracle && npm run eval:offline:trading && npm run eval:offline:trading:oracle && npm run lint:n8n && npm run test:n8n && npm run test:replay"
   },
   "repository": {
     "type": "git",

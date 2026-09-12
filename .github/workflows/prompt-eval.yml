@@ -29,6 +29,9 @@ jobs:
       - name: SVC_04 dataset & config
         run: node evals/validate_security_dataset.mjs
 
+      - name: SVC_06 dataset & config
+        run: node evals/validate_trading_dataset.mjs
+
   # Gate 1b — the n8n export cannot execute here, so CI lints its structure
   # (guardrail present, writes disabled, audit sink reachable) and executes
   # its embedded Code nodes against adversarial inputs.
@@ -77,6 +80,13 @@ jobs:
             expected_failures: 7
             results_file: naive-security-results.json
             oracle_results_file: oracle-security-results.json
+          - service: SVC_06 paper trading agent
+            offline_config: evals/promptfooconfig.offline.trading.yaml
+            broken_provider: naive_trader
+            oracle_provider: oracle_trading
+            expected_failures: 9
+            results_file: naive-trading-results.json
+            oracle_results_file: oracle-trading-results.json
     steps:
       - uses: actions/checkout@v4
 
@@ -174,6 +184,18 @@ jobs:
           npx promptfoo eval -c promptfooconfig.security.yaml --no-cache --no-table -o eval-results-security.json || true
           node evals/check_results.mjs eval-results-security.json --require-all-pass
 
+      - name: Run promptfoo eval (SVC_06 paper trading agent)
+        if: steps.keys.outputs.present == 'true'
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PROMPTFOO_DISABLE_TELEMETRY: '1'
+          PROMPTFOO_DISABLE_UPDATE: '1'
+          PROMPTFOO_DISABLE_SHARE: '1'
+        run: |
+          npx promptfoo eval -c promptfooconfig.trading.yaml --no-cache --no-table -o eval-results-trading.json || true
+          node evals/check_results.mjs eval-results-trading.json --require-all-pass
+
       - uses: actions/upload-artifact@v4
         if: always() && steps.keys.outputs.present == 'true'
         with:
@@ -181,3 +203,4 @@ jobs:
           path: |
             eval-results.json
             eval-results-security.json
+            eval-results-trading.json

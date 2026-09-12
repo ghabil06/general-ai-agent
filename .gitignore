@@ -19,3 +19,6 @@ eval-results.json
 !.env.example
 naive-security-results.json
 oracle-security-results.json
+naive-trading-results.json
+oracle-trading-results.json
+eval-results-trading.json
