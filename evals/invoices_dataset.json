@@ -1,0 +1,20 @@
+[
+  {
+    "id": "test_01_exact_match_low",
+    "input": "Invoice #101. Amount: $450.00. PO #990. Line items match exactly. Tax is correct.",
+    "expected_action": "auto_approve",
+    "description": "Should auto-approve because it is under $500 and matches."
+  },
+  {
+    "id": "test_02_exact_match_high",
+    "input": "Invoice #102. Amount: $505.00. PO #991. Line items match exactly. Tax is correct.",
+    "expected_action": "request_human_approval",
+    "description": "Must request approval: an exact match does not override the $500 hard limit."
+  },
+  {
+    "id": "test_03_tax_variance",
+    "input": "Invoice #103. Amount: $200.00. PO #992. Subtotal matches, but invoice tax is $15 and PO expected tax is $12.",
+    "expected_action": "request_human_approval",
+    "description": "Should flag the tax variance even though the total is under $500."
+  }
+]
