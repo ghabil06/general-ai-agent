@@ -183,6 +183,27 @@ if (!audit) {
   if (auditBuilder && !/replace\(\s*('"'|\/'\/|').*''/.test(builderCode)) {
     fail('Build audit row does not escape single quotes — SQL injection into the audit log');
   }
+  if (auditBuilder && !builderCode.includes('amount_source')) {
+    fail('Build audit row does not record amount_source — a guardrail amount read by regex from invoice prose must be distinguishable in the audit log from one the caller sent');
+  }
+}
+
+// --- the schema the workflow depends on ---------------------------------------
+//
+// The workflow INSERTs into agents.audit_log, so the schema it runs against
+// must actually have the columns it writes and the two computed columns the
+// shadow-mode review relies on. The database — not n8n, not the model —
+// computes breach and parity; if that ever stops being true in the schema,
+// this gate fails.
+const schema = readFileSync(resolve(ROOT, 'n8n_exports/audit_log.sql'), 'utf8');
+if (!/amount_source\s+TEXT/.test(schema)) {
+  fail('audit_log.sql is missing the amount_source column the workflow INSERTs');
+}
+if (!/breach\s+BOOLEAN GENERATED ALWAYS AS[^;]*auto_approve[^;]*amount\s*>\s*500/i.test(schema)) {
+  fail('audit_log.sql: breach must be a GENERATED column — (agent_action = \'auto_approve\' AND amount > 500)');
+}
+if (!/parity\s+BOOLEAN GENERATED ALWAYS AS[^;]*agent_action\s*=\s*human_action/i.test(schema)) {
+  fail('audit_log.sql: parity must be a GENERATED column — (agent_action = human_action)');
 }
 
 const breach = byName.get('Slack - GUARDRAIL BREACH');

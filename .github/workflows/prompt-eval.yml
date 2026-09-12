@@ -48,6 +48,9 @@ jobs:
       - name: Execute the workflow's Code nodes against adversarial inputs
         run: node n8n_exports/test_parse_nodes.mjs
 
+      - name: Shadow-week replay tool dry-run (example input stays valid)
+        run: node n8n_exports/replay_history.mjs --dry-run --file n8n_exports/replay_sample.jsonl
+
   # Gate 2 — proves the assertions can still fail, for every agent. Each
   # service runs its deliberately broken fixture and requires its exact
   # predicted failure count, plus a 12/12 oracle. If a broken fixture ever
