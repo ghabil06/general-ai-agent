@@ -1,0 +1,354 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="description" content="Larptech Bounded-Agency Agent Suite — AI safety control center for autonomous agent orchestration with real-time policy enforcement.">
+  <title>LARPTECH • AI Agent Command Center</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&family=JetBrains+Mono:wght@300;400;500;600;700&family=Outfit:wght@300;400;500;600;700;800;900&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <!-- Animated Canvas Background -->
+  <canvas id="particle-canvas"></canvas>
+  <div class="aurora-bg">
+    <div class="aurora-band aurora-1"></div>
+    <div class="aurora-band aurora-2"></div>
+    <div class="aurora-band aurora-3"></div>
+  </div>
+
+  <!-- Splash Loading Overlay -->
+  <div class="splash-overlay" id="splash-overlay">
+    <div class="splash-content">
+      <div class="splash-ring" id="splash-ring">
+        <svg viewBox="0 0 100 100"><circle cx="50" cy="50" r="44" /></svg>
+      </div>
+      <div class="splash-text">
+        <span class="splash-word" data-idx="0">LARPTECH</span>
+        <span class="splash-word" data-idx="1">BOUNDED</span>
+        <span class="splash-word" data-idx="2">AGENCY</span>
+      </div>
+      <div class="splash-bar-wrap"><div class="splash-bar" id="splash-bar"></div></div>
+    </div>
+  </div>
+
+  <div class="app" id="app">
+    <!-- === TOP BAR === -->
+    <header class="topbar" id="topbar">
+      <div class="topbar-left">
+        <div class="logo-mark" id="logo-mark">
+          <div class="logo-hex"><span>L</span></div>
+        </div>
+        <div class="logo-text">
+          <h1>LARPTECH<span class="accent-dot">.</span></h1>
+          <p class="tagline">AI Safety Command Center</p>
+        </div>
+      </div>
+      <nav class="topbar-center">
+        <button class="nav-pill active" data-section="mission-control" id="nav-mc">Mission Control</button>
+        <button class="nav-pill" data-section="threat-lab" id="nav-tl">Threat Lab</button>
+        <button class="nav-pill" data-section="compliance" id="nav-cp">Compliance</button>
+      </nav>
+      <div class="topbar-right">
+        <div class="live-clock" id="live-clock">00:00:00</div>
+        <div class="uptime-badge" id="uptime-badge">
+          <span class="uptime-dot"></span>
+          <span>UPTIME <strong id="uptime-val">0s</strong></span>
+        </div>
+        <button class="btn-icon-round" id="btn-theme" title="Toggle theme">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="5"/><path d="M12 1v2M12 21v2M4.22 4.22l1.42 1.42M18.36 18.36l1.42 1.42M1 12h2M21 12h2M4.22 19.78l1.42-1.42M18.36 5.64l1.42-1.42"/></svg>
+        </button>
+      </div>
+    </header>
+
+    <!-- === HERO STATS STRIP === -->
+    <section class="hero-stats" id="hero-stats">
+      <div class="stat-card" id="stat-agents">
+        <div class="stat-ring">
+          <svg viewBox="0 0 36 36"><circle cx="18" cy="18" r="15.9"/><circle cx="18" cy="18" r="15.9" class="stat-ring-fill" style="stroke-dasharray: 100, 100"/></svg>
+          <span class="stat-ring-num" id="stat-agents-num">3</span>
+        </div>
+        <div class="stat-info"><span class="stat-label">Active Agents</span><span class="stat-val">SVC-03 / 04 / 06</span></div>
+      </div>
+      <div class="stat-card" id="stat-cases">
+        <div class="stat-num" id="stat-cases-num">36</div>
+        <div class="stat-info"><span class="stat-label">Eval Test Cases</span><span class="stat-val">Offline Harness</span></div>
+      </div>
+      <div class="stat-card" id="stat-gates">
+        <div class="stat-num text-emerald" id="stat-gates-num">0</div>
+        <div class="stat-info"><span class="stat-label">Gates Passed</span><span class="stat-val">Quality Assurance</span></div>
+      </div>
+      <div class="stat-card" id="stat-inject">
+        <div class="stat-num text-crimson" id="stat-inject-num">0</div>
+        <div class="stat-info"><span class="stat-label">Injections Blocked</span><span class="stat-val">Adversarial Defense</span></div>
+      </div>
+      <div class="stat-card" id="stat-sims">
+        <div class="stat-num text-purple" id="stat-sims-num">0</div>
+        <div class="stat-info"><span class="stat-label">Simulations Run</span><span class="stat-val">This Session</span></div>
+      </div>
+    </section>
+
+    <!-- === AGENT SELECTOR (Horizontal Cards) === -->
+    <section class="agent-selector" id="agent-selector">
+      <div class="agent-card active" data-agent="svc_03" id="acard-svc_03">
+        <div class="acard-glow"></div>
+        <div class="acard-top">
+          <div class="acard-icon"><span>💳</span></div>
+          <div class="acard-status-dot on"></div>
+        </div>
+        <h3 class="acard-code">SVC_03</h3>
+        <p class="acard-name">Accounts Payable</p>
+        <div class="acard-boundary">
+          <span class="acard-limit">&le; $500.00</span>
+          <span class="acard-tag">AUTO-CAP</span>
+        </div>
+        <div class="acard-bar"><div class="acard-bar-fill" style="width:100%"></div></div>
+      </div>
+
+      <div class="agent-card" data-agent="svc_04" id="acard-svc_04">
+        <div class="acard-glow"></div>
+        <div class="acard-top">
+          <div class="acard-icon"><span>🛡️</span></div>
+          <div class="acard-status-dot on"></div>
+        </div>
+        <h3 class="acard-code">SVC_04</h3>
+        <p class="acard-name">Security Triage</p>
+        <div class="acard-boundary">
+          <span class="acard-limit">Level 12</span>
+          <span class="acard-tag">THRESHOLD</span>
+        </div>
+        <div class="acard-bar"><div class="acard-bar-fill" style="width:100%"></div></div>
+      </div>
+
+      <div class="agent-card" data-agent="svc_06" id="acard-svc_06">
+        <div class="acard-glow"></div>
+        <div class="acard-top">
+          <div class="acard-icon"><span>📈</span></div>
+          <div class="acard-status-dot on"></div>
+        </div>
+        <h3 class="acard-code">SVC_06</h3>
+        <p class="acard-name">Paper Trading</p>
+        <div class="acard-boundary">
+          <span class="acard-limit">&le; $10,000</span>
+          <span class="acard-tag">RISK-CAP</span>
+        </div>
+        <div class="acard-bar"><div class="acard-bar-fill" style="width:100%"></div></div>
+      </div>
+    </section>
+
+    <!-- === PIPELINE VISUALIZER === -->
+    <section class="pipeline-vis glass" id="pipeline-vis">
+      <div class="section-head">
+        <div><span class="sec-tag">LIVE PIPELINE</span><h2>Autonomous Boundary Enforcement Flow</h2></div>
+        <div class="pipeline-legend">
+          <span><i class="ldot ldot-cyan"></i>Processing</span>
+          <span><i class="ldot ldot-amber"></i>Guardrail</span>
+          <span><i class="ldot ldot-emerald"></i>Commit</span>
+        </div>
+      </div>
+      <div class="pipeline-track" id="pipeline-track">
+        <div class="pipe-line"><div class="pipe-signal" id="pipe-signal"></div></div>
+        <div class="pipe-node" id="pn-1" data-label="Ingest"><div class="pn-inner"><span>📥</span></div><small>Normalize</small></div>
+        <div class="pipe-node" id="pn-2" data-label="Scan"><div class="pn-inner"><span>🛡️</span></div><small>Injection Defense</small></div>
+        <div class="pipe-node" id="pn-3" data-label="Decide"><div class="pn-inner"><span>🧠</span></div><small>Agency Matrix</small></div>
+        <div class="pipe-node boundary" id="pn-4" data-label="Guard"><div class="pn-inner"><span>⚖️</span></div><small id="pn4-label">$500 Cap</small></div>
+        <div class="pipe-node" id="pn-5" data-label="Log"><div class="pn-inner"><span>📜</span></div><small>Audit & Dispatch</small></div>
+      </div>
+    </section>
+
+    <!-- === MAIN WORKSPACE === -->
+    <div class="workspace" id="workspace">
+      <!-- LEFT: Execution Lab -->
+      <section class="glass lab-panel" id="lab-panel">
+        <div class="section-head">
+          <div><span class="sec-tag">EXECUTION LAB</span><h3>Select Scenario & Execute</h3></div>
+          <span class="case-count-chip" id="case-count-chip">12 Cases</span>
+        </div>
+
+        <div class="lab-body">
+          <label class="field-label" for="case-select">DATASET FIXTURE</label>
+          <select id="case-select" class="field-select"></select>
+
+          <div class="case-info-strip" id="case-info-strip">
+            <div class="cis-item"><span class="cis-key">Category</span><span class="cis-val chip" id="cis-category">happy_path</span></div>
+            <div class="cis-item"><span class="cis-key">Expected</span><span class="cis-val chip chip-green" id="cis-expected">auto_approve</span></div>
+          </div>
+          <p class="case-desc" id="case-desc">Baseline clean invoice, under limit, exact match.</p>
+
+          <label class="field-label" for="payload-ta">PAYLOAD UNDER REVIEW <button class="link-btn" id="btn-reset">Reset</button></label>
+          <textarea id="payload-ta" class="field-ta" rows="3" spellcheck="false"></textarea>
+
+          <!-- Radial Gauge -->
+          <div class="radial-gauge-wrap" id="radial-gauge-wrap">
+            <div class="radial-gauge" id="radial-gauge">
+              <svg viewBox="0 0 120 120" id="gauge-svg">
+                <circle cx="60" cy="60" r="52" class="gauge-bg"/>
+                <circle cx="60" cy="60" r="52" class="gauge-arc" id="gauge-arc"/>
+              </svg>
+              <div class="gauge-center">
+                <div class="gauge-val" id="gauge-val">$450</div>
+                <div class="gauge-cap" id="gauge-cap">/ $500</div>
+              </div>
+            </div>
+            <div class="gauge-label-row">
+              <span class="gauge-label-text" id="gauge-label">WITHIN BOUNDARY</span>
+            </div>
+          </div>
+
+          <button class="btn-execute" id="btn-execute">
+            <div class="btn-execute-bg"></div>
+            <span class="btn-execute-icon">⚡</span>
+            <span class="btn-execute-text">Execute Agent Workflow</span>
+          </button>
+
+          <!-- Batch Run All Cases -->
+          <button class="btn-batch" id="btn-batch">
+            <span>🔄</span> Batch Run All <span id="batch-count">12</span> Cases
+          </button>
+        </div>
+      </section>
+
+      <!-- RIGHT: Results & Telemetry -->
+      <section class="glass results-panel" id="results-panel">
+        <div class="section-head">
+          <div><span class="sec-tag">TELEMETRY</span><h3>Decision & Guardrail Verdict</h3></div>
+          <div class="verdict-chip" id="verdict-chip">
+            <span class="vc-icon">⏳</span>
+            <span class="vc-text">STANDBY</span>
+          </div>
+        </div>
+
+        <div class="results-body">
+          <!-- Stage Timeline -->
+          <div class="stage-timeline" id="stage-timeline">
+            <div class="stg" data-stg="0"><div class="stg-dot"></div><div class="stg-line"></div><div class="stg-content"><strong>Ingestion</strong><span class="stg-detail" id="stg0-d">Awaiting</span></div><span class="stg-ms" id="stg0-ms">--</span></div>
+            <div class="stg" data-stg="1"><div class="stg-dot"></div><div class="stg-line"></div><div class="stg-content"><strong>Injection Scan</strong><span class="stg-detail" id="stg1-d">Awaiting</span></div><span class="stg-ms" id="stg1-ms">--</span></div>
+            <div class="stg" data-stg="2"><div class="stg-dot"></div><div class="stg-line"></div><div class="stg-content"><strong>Decision Matrix</strong><span class="stg-detail" id="stg2-d">Awaiting</span></div><span class="stg-ms" id="stg2-ms">--</span></div>
+            <div class="stg" data-stg="3"><div class="stg-dot"></div><div class="stg-line"></div><div class="stg-content"><strong>Guardrail Check</strong><span class="stg-detail" id="stg3-d">Awaiting</span></div><span class="stg-ms" id="stg3-ms">--</span></div>
+            <div class="stg" data-stg="4"><div class="stg-dot"></div><div class="stg-line"></div><div class="stg-content"><strong>Audit Commit</strong><span class="stg-detail" id="stg4-d">Awaiting</span></div><span class="stg-ms" id="stg4-ms">--</span></div>
+          </div>
+
+          <!-- Decision Output -->
+          <div class="decision-box" id="decision-box">
+            <div class="dbox-head">
+              <span class="dbox-tag">STRUCTURED OUTPUT</span>
+              <span class="dbox-dur" id="dbox-dur">-- ms</span>
+            </div>
+            <pre class="dbox-code" id="dbox-code">{ "awaiting": "execution" }</pre>
+          </div>
+
+          <!-- Audit SQL Preview -->
+          <div class="sql-preview" id="sql-preview">
+            <span class="sql-tag">AUDIT SQL</span>
+            <code id="sql-code">-- Execute a simulation to generate audit SQL</code>
+          </div>
+
+          <!-- Execution History (NEW) -->
+          <div class="exec-history" id="exec-history">
+            <div class="eh-head"><span class="sec-tag">SESSION HISTORY</span><button class="link-btn" id="btn-clear-history">Clear</button></div>
+            <div class="eh-list" id="eh-list">
+              <div class="eh-empty">No executions yet. Run a simulation above.</div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- === BATCH RESULTS MODAL (NEW) === -->
+    <div class="modal-overlay" id="batch-modal" style="display:none">
+      <div class="modal glass">
+        <div class="modal-head">
+          <h3>Batch Execution Results</h3>
+          <button class="btn-icon-round" id="btn-close-batch">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="batch-summary" id="batch-summary"></div>
+          <div class="batch-progress-bar"><div class="batch-progress-fill" id="batch-progress-fill"></div></div>
+          <div class="batch-table-wrap">
+            <table class="batch-table">
+              <thead><tr><th>#</th><th>Description</th><th>Expected</th><th>Got</th><th>Match</th><th>Injection</th></tr></thead>
+              <tbody id="batch-tbody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- === QUALITY GATES === -->
+    <section class="glass gates-section" id="gates-section">
+      <div class="section-head">
+        <div><span class="sec-tag">QUALITY GATES</span><h2>Deterministic Verification Suite</h2></div>
+        <button class="btn-sm btn-accent" id="btn-run-all-gates"><span>⚡</span> Run All Gates</button>
+      </div>
+      <div class="gates-row">
+        <div class="gate-card" id="gc-1">
+          <div class="gc-num">01</div>
+          <h4>Dataset Consistency</h4>
+          <p>Validates all 3 agent datasets against config templates.</p>
+          <div class="gc-status" id="gs-1"><span class="gs-dot"></span><span class="gs-text">READY</span></div>
+          <button class="btn-sm btn-outline" data-gate="validate_all" id="gb-1">Run</button>
+        </div>
+        <div class="gate-card" id="gc-2">
+          <div class="gc-num">02</div>
+          <h4>Workflow Node Tests</h4>
+          <p>n8n parse nodes, SQL injection doubling, regex amounts.</p>
+          <div class="gc-status" id="gs-2"><span class="gs-dot"></span><span class="gs-text">READY</span></div>
+          <button class="btn-sm btn-outline" data-gate="test_nodes" id="gb-2">Run</button>
+        </div>
+        <div class="gate-card" id="gc-3">
+          <div class="gc-num">03</div>
+          <h4>Replay Dry-Run</h4>
+          <p>Shadow-mode audit replay from production history.</p>
+          <div class="gc-status" id="gs-3"><span class="gs-dot"></span><span class="gs-text">READY</span></div>
+          <button class="btn-sm btn-outline" data-gate="replay" id="gb-3">Run</button>
+        </div>
+      </div>
+
+      <!-- Terminal -->
+      <div class="terminal" id="terminal">
+        <div class="term-chrome"><span class="tc-dot tc-r"></span><span class="tc-dot tc-y"></span><span class="tc-dot tc-g"></span><span class="term-title">Terminal</span><button class="link-btn" id="btn-clear-term">Clear</button></div>
+        <pre class="term-body" id="term-body">System ready. Select a gate to execute.</pre>
+      </div>
+    </section>
+
+    <!-- === POLICY VIEWER === -->
+    <section class="glass policy-section" id="policy-section">
+      <div class="section-head">
+        <div><span class="sec-tag">POLICY INSPECTOR</span><h2>Agent Prompt & Compliance Rules</h2></div>
+        <div class="policy-tabs">
+          <button class="ptab active" id="ptab-main">System Prompt</button>
+          <button class="ptab" id="ptab-guard">Secondary Guardrail</button>
+        </div>
+      </div>
+      <div class="policy-viewer">
+        <pre class="policy-code" id="policy-code">Loading...</pre>
+      </div>
+    </section>
+
+    <!-- === AUDIT LOG FEED === -->
+    <section class="glass audit-section" id="audit-section">
+      <div class="section-head">
+        <div><span class="sec-tag">IMMUTABLE AUDIT LOG</span><h2>Shadow Mode Replay Stream</h2></div>
+        <span class="chip chip-cyan" id="audit-chip">0 records</span>
+      </div>
+      <div class="table-scroll">
+        <table class="data-table">
+          <thead><tr><th>Time</th><th>Agent</th><th>Action</th><th>Amount</th><th>Source</th><th>Verdict</th></tr></thead>
+          <tbody id="audit-tbody"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- === FOOTER === -->
+    <footer class="app-footer" id="app-footer">
+      <span>LARPTECH Bounded-Agency Suite · v1.0.0</span>
+      <span>Anime.js v4.5.0 · Dual Guardrail Architecture</span>
+    </footer>
+  </div>
+
+  <script src="/vendor/anime.umd.min.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
