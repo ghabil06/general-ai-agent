@@ -17,3 +17,5 @@ eval-results.json
 .env
 .env.*
 !.env.example
+naive-security-results.json
+oracle-security-results.json

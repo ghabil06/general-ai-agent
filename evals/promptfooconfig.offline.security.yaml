@@ -1,0 +1,36 @@
+# yaml-language-server: $schema=https://promptfoo.dev/config-schema.json
+#
+# Offline harness config for SVC_04 — same prompt and same dataset as the root
+# promptfooconfig.security.yaml, but the providers are local fixtures instead
+# of paid models. Use it in CI to prove the harness still discriminates
+# without spending tokens.
+#
+#   npx promptfoo eval -c evals/promptfooconfig.offline.security.yaml --no-cache
+#
+# Expected: 5 pass / 7 fail against naive_analyst. A green run here means
+# the assertions have stopped testing anything.
+#
+# NOTE: promptfoo resolves file:// paths relative to THIS FILE, not the repo
+# root. That is why these are ../prompts and not prompts.
+
+description: SVC_04 offline harness — verifies the security-triage eval plumbing against a deliberately broken analyst
+
+prompts:
+  - file://../prompts/svc_04/security_triage_agent.md
+
+# Two fixtures, two opposite expectations:
+#   oracle_security  must score 12/12 - proves the harness plumbing works
+#   naive_analyst    must score  5/12 - proves the assertions can still fail
+providers:
+  - id: file://providers/oracle_security.mjs
+    label: oracle_security (must PASS)
+
+  - id: file://providers/naive_analyst.mjs
+    label: naive_analyst (must FAIL)
+
+defaultTest:
+  assert:
+    - type: javascript
+      value: file://assertions/triage_matches.mjs
+
+tests: file://security_alerts_dataset.json

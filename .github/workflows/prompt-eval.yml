@@ -9,7 +9,7 @@ on:
 jobs:
   # Gate 1 — always runs, needs no secrets, costs nothing.
   # Catches a dataset that contradicts itself, a prompt that lost its
-  # {{invoice_data}} placeholder, and a config that points at a missing file.
+  # placeholder, and a config that points at a missing file — for both agents.
   dataset-gate:
     name: Dataset & config consistency
     runs-on: ubuntu-latest
@@ -23,15 +23,57 @@ jobs:
 
       - run: npm ci
 
-      - run: node evals/validate_dataset.mjs
+      - name: SVC_03 dataset & config
+        run: node evals/validate_dataset.mjs
 
-  # Gate 2 — proves the assertions can still fail. Runs the suite against the
-  # deliberately broken naive_autopilot fixture and requires exactly 9 of 12
-  # cases to fail. If this goes green, the eval has stopped testing anything.
+      - name: SVC_04 dataset & config
+        run: node evals/validate_security_dataset.mjs
+
+  # Gate 1b — the n8n export cannot execute here, so CI lints its structure
+  # (guardrail present, writes disabled, audit sink reachable) and executes
+  # its embedded Code nodes against adversarial inputs.
+  n8n-export-gate:
+    name: n8n export lint & logic
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Lint workflow structure
+        run: node n8n_exports/validate_workflow.mjs
+
+      - name: Execute the workflow's Code nodes against adversarial inputs
+        run: node n8n_exports/test_parse_nodes.mjs
+
+  # Gate 2 — proves the assertions can still fail, for every agent. Each
+  # service runs its deliberately broken fixture and requires its exact
+  # predicted failure count, plus a 12/12 oracle. If a broken fixture ever
+  # goes green, the eval has stopped testing anything.
   harness-discriminates:
     name: Offline harness (must FAIL on purpose)
     runs-on: ubuntu-latest
     needs: dataset-gate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: SVC_03 invoice agent
+            offline_config: evals/promptfooconfig.offline.yaml
+            broken_provider: naive
+            oracle_provider: oracle
+            expected_failures: 9
+            results_file: naive-results.json
+            oracle_results_file: oracle-results.json
+          - service: SVC_04 security triage agent
+            offline_config: evals/promptfooconfig.offline.security.yaml
+            broken_provider: naive_analyst
+            oracle_provider: oracle_security
+            expected_failures: 7
+            results_file: naive-security-results.json
+            oracle_results_file: oracle-security-results.json
     steps:
       - uses: actions/checkout@v4
 
@@ -42,7 +84,7 @@ jobs:
 
       - run: npm ci
 
-      - name: Broken agent must fail 9/12
+      - name: '${{ matrix.service }}: broken fixture must fail exactly ${{ matrix.expected_failures }}/12'
         env:
           PROMPTFOO_DISABLE_TELEMETRY: '1'
           PROMPTFOO_DISABLE_UPDATE: '1'
@@ -51,25 +93,26 @@ jobs:
         # outcome here, so its exit code is swallowed and check_results.mjs
         # makes the real assertion on the exact failure count.
         run: |
-          rm -f naive-results.json
+          rm -f "${{ matrix.results_file }}"
           npx promptfoo eval \
-            -c evals/promptfooconfig.offline.yaml \
-            --filter-providers naive \
-            --no-cache --no-table -o naive-results.json || true
-          node evals/check_results.mjs naive-results.json --expect-failures 9 --total 12
+            -c "${{ matrix.offline_config }}" \
+            --filter-providers "${{ matrix.broken_provider }}" \
+            --no-cache --no-table -o "${{ matrix.results_file }}" || true
+          node evals/check_results.mjs "${{ matrix.results_file }}" \
+            --expect-failures "${{ matrix.expected_failures }}" --total 12
 
-      - name: Oracle fixture must pass 12/12
+      - name: '${{ matrix.service }}: oracle fixture must pass 12/12'
         env:
           PROMPTFOO_DISABLE_TELEMETRY: '1'
           PROMPTFOO_DISABLE_UPDATE: '1'
           PROMPTFOO_DISABLE_SHARE: '1'
         run: |
-          rm -f oracle-results.json
+          rm -f "${{ matrix.oracle_results_file }}"
           npx promptfoo eval \
-            -c evals/promptfooconfig.offline.yaml \
-            --filter-providers oracle \
-            --no-cache --no-table -o oracle-results.json || true
-          node evals/check_results.mjs oracle-results.json --expect-failures 0 --total 12
+            -c "${{ matrix.offline_config }}" \
+            --filter-providers "${{ matrix.oracle_provider }}" \
+            --no-cache --no-table -o "${{ matrix.oracle_results_file }}" || true
+          node evals/check_results.mjs "${{ matrix.oracle_results_file }}" --expect-failures 0 --total 12
 
   # Gate 3 — the real thing. Only runs when model API keys are configured as
   # repo secrets, so forks and PRs from branches without secrets stay green.
@@ -101,7 +144,7 @@ jobs:
             echo "::warning::No OPENAI_API_KEY / ANTHROPIC_API_KEY secret configured — skipping the live model eval."
           fi
 
-      - name: Run promptfoo eval
+      - name: Run promptfoo eval (SVC_03 invoice agent)
         if: steps.keys.outputs.present == 'true'
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -116,8 +159,22 @@ jobs:
           npx promptfoo eval -c promptfooconfig.yaml --no-cache --no-table -o eval-results.json || true
           node evals/check_results.mjs eval-results.json --require-all-pass
 
+      - name: Run promptfoo eval (SVC_04 security triage agent)
+        if: steps.keys.outputs.present == 'true'
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          PROMPTFOO_DISABLE_TELEMETRY: '1'
+          PROMPTFOO_DISABLE_UPDATE: '1'
+          PROMPTFOO_DISABLE_SHARE: '1'
+        run: |
+          npx promptfoo eval -c promptfooconfig.security.yaml --no-cache --no-table -o eval-results-security.json || true
+          node evals/check_results.mjs eval-results-security.json --require-all-pass
+
       - uses: actions/upload-artifact@v4
         if: always() && steps.keys.outputs.present == 'true'
         with:
           name: eval-results
-          path: eval-results.json
+          path: |
+            eval-results.json
+            eval-results-security.json
