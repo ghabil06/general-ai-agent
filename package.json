@@ -13,8 +13,9 @@
     "eval:offline:security:oracle": "rm -f oracle-security-results.json; promptfoo eval -c evals/promptfooconfig.offline.security.yaml --no-cache --no-table --filter-providers oracle_security -o oracle-security-results.json || true; node evals/check_results.mjs oracle-security-results.json --require-all-pass",
     "lint:n8n": "node n8n_exports/validate_workflow.mjs",
     "test:n8n": "node n8n_exports/test_parse_nodes.mjs",
+    "test:replay": "node n8n_exports/replay_history.mjs --dry-run --file n8n_exports/replay_sample.jsonl",
     "view": "promptfoo view",
-    "gate": "npm run validate && npm run validate:security && npm run eval:offline && npm run eval:offline:oracle && npm run eval:offline:security && npm run eval:offline:security:oracle && npm run lint:n8n && npm run test:n8n"
+    "gate": "npm run validate && npm run validate:security && npm run eval:offline && npm run eval:offline:oracle && npm run eval:offline:security && npm run eval:offline:security:oracle && npm run lint:n8n && npm run test:n8n && npm run test:replay"
   },
   "repository": {
     "type": "git",

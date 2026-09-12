@@ -19,6 +19,7 @@ CREATE TABLE IF NOT EXISTS agents.audit_log (
   invoice_ref     TEXT,
   vendor          TEXT,
   amount          NUMERIC(12,2),
+  amount_source   TEXT,                       -- structured | regex_from_text | unknown
   po_present      BOOLEAN,
   po_verified     BOOLEAN,
 
@@ -34,11 +35,15 @@ CREATE TABLE IF NOT EXISTS agents.audit_log (
 
   -- filled in later by the parity review
   human_action    TEXT,                    -- what the accounting team actually did
-  parity          BOOLEAN,                 -- agent_action = human_action
 
-  -- deterministic, computed by the database, not by n8n or the model
+  -- deterministic, computed by the database, not by n8n or the model.
+  -- Setting human_action during the parity review is the ONLY manual step:
+  -- parity follows by itself. NULL human_action (not yet reviewed) gives
+  -- NULL parity, so unreviewed rows never count as disagreements.
   breach          BOOLEAN GENERATED ALWAYS AS
-                    (agent_action = 'auto_approve' AND amount > 500) STORED
+                    (agent_action = 'auto_approve' AND amount > 500) STORED,
+  parity          BOOLEAN GENERATED ALWAYS AS
+                    (agent_action = human_action) STORED
 );
 
 -- The one query you will run every morning during shadow week.

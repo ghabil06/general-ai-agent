@@ -80,12 +80,52 @@ check('structured amount wins', runParse('{"action":"auto_approve"}', { amount: 
 check('regex fallback parses "$1,234.56"', runParse('{"action":"auto_approve"}', { invoice_text: 'Invoice total: $1,234.56 due now' }).amount, 1234.56);
 check('unknown amount stays null', runParse('{"action":"auto_approve"}', { invoice_text: 'no figure here' }).amount, null);
 
+console.log('Parse decision — amount provenance, for the audit row:');
+check('structured amount labelled structured', runParse('{"action":"auto_approve"}', { amount: 505.0, invoice_text: 'total $450.00' }).amount_source, 'structured');
+check('regex fallback labelled regex_from_text', runParse('{"action":"auto_approve"}', { invoice_text: 'Invoice total: $1,234.56 due now' }).amount_source, 'regex_from_text');
+check('missing amount labelled unknown', runParse('{"action":"auto_approve"}', { invoice_text: 'no figure here' }).amount_source, 'unknown');
+
 console.log('Build audit row — the INSERT must be injection-proof:');
-parsed = { invoice_ref: "INV-1' OR '1'='1", vendor: null, amount: null, po_match: true, action: 'reject_and_flag', reasoning: "it's flagged", raw_output: null };
+parsed = { invoice_ref: "INV-1' OR '1'='1", vendor: null, amount: null, amount_source: 'unknown', po_match: true, action: 'reject_and_flag', reasoning: "it's flagged", raw_output: null };
 const sql = runBuilder();
 check('single quotes doubled', sql.includes("INV-1'' OR ''1''=''1"), true);
 check('NULLs written as NULL', sql.includes('NULL'), true);
 check('targets agents.audit_log', sql.includes('agents.audit_log'), true);
+check('records amount_source', sql.includes('amount_source'), true);
+
+// A column/value count mismatch produces SQL that fails only at INSERT time,
+// on the first shadow-week run. Catch it here instead. The value counter is
+// single-quote aware, so a legitimate comma inside a value does not miscount.
+function countCsvItems(text) {
+  let count = 0;
+  let inString = false;
+  let sawItem = false;
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+    if (inString) {
+      if (ch === "'") {
+        // '' is an escaped quote; anything else closes the string.
+        if (text[i + 1] !== "'") inString = false;
+        else i++;
+      }
+      sawItem = true;
+    } else if (ch === "'") {
+      inString = true;
+      sawItem = true;
+    } else if (ch === ',') {
+      if (sawItem) count++;
+      sawItem = false;
+    } else if (/\S/.test(ch)) {
+      sawItem = true;
+    }
+  }
+  if (sawItem) count++;
+  return count;
+}
+
+const colList = sql.slice(sql.indexOf('(') + 1, sql.indexOf(')'));
+const valuesList = sql.slice(sql.indexOf('VALUES (') + 'VALUES ('.length, sql.lastIndexOf(')'));
+check('INSERT column count matches value count', countCsvItems(valuesList), countCsvItems(colList));
 
 if (failures) {
   console.error(`\n${failures} check(s) failed against the n8n export`);
