@@ -30,7 +30,7 @@ npm run eval:offline:oracle       # SVC_03, oracle must pass 12/12
 npm run eval:offline:security     # SVC_04, broken fixture must fail exactly 7/12
 npm run eval:offline:security:oracle
 
-npm run gate                      # all of the above, in order
+npm run gate                      # all of the above, plus the n8n export lint and tests
 
 # Gate 3: live models. needs OPENAI_API_KEY / ANTHROPIC_API_KEY
 npm run eval                      # SVC_03
