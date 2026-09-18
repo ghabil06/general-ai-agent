@@ -20,8 +20,17 @@
     "lint:n8n": "node n8n_exports/validate_workflow.mjs",
     "test:n8n": "node n8n_exports/test_parse_nodes.mjs",
     "test:replay": "node n8n_exports/replay_history.mjs --dry-run --file n8n_exports/replay_sample.jsonl",
+    "test": "node --test \"tests/unit/*.test.mjs\"",
+    "test:unit": "node --test \"tests/unit/*.test.mjs\"",
+    "test:integration": "node --test \"tests/integration/*.test.mjs\"",
+    "test:api": "node --test \"tests/integration/api.test.mjs\"",
+    "verify:runtime": "node scripts/verify-runtime.mjs",
+    "eval:runtime": "node scripts/eval-runtime.mjs",
+    "eval:runtime:oracle": "node scripts/eval-runtime.mjs --oracle",
     "view": "promptfoo view",
-    "gate": "npm run validate && npm run validate:security && npm run validate:trading && npm run eval:offline && npm run eval:offline:oracle && npm run eval:offline:security && npm run eval:offline:security:oracle && npm run eval:offline:trading && npm run eval:offline:trading:oracle && npm run lint:n8n && npm run test:n8n && npm run test:replay"
+    "gate": "npm run validate && npm run validate:security && npm run validate:trading && npm run eval:offline && npm run eval:offline:oracle && npm run eval:offline:security && npm run eval:offline:security:oracle && npm run eval:offline:trading && npm run eval:offline:trading:oracle && npm run lint:n8n && npm run test:n8n && npm run test:replay",
+    "gate:runtime": "npm run test:unit && npm run test:integration && npm run verify:runtime && npm run eval:runtime",
+    "gate:all": "npm run gate && npm run gate:runtime"
   },
   "repository": {
     "type": "git",

@@ -1,0 +1,22 @@
+{
+  "_provenance": {
+    "derivedFrom": "evals/security_alerts_dataset.json",
+    "rule": "Every entry is an IP that appears in the SVC_04 dataset as allowlisted, plus the near-miss IP that must NOT be allowlisted is deliberately omitted.",
+    "notes": [
+      "10.20.0.31 is the only IP the dataset calls allowlisted ('approved scanner, exact allowlist match'). Case 11 states it explicitly: 'The approved scanner allowlist contains 10.20.0.31 only.' Adding further entries would contradict the eval dataset.",
+      "10.20.0.130 (case 11) is the near-miss: same /24, one octet away, NOT allowlisted. It is absent by construction, and check_ip_allowlist performs an exact-string match so it cannot match.",
+      "10.44.2.17 (case 02), 203.0.113.77 (case 03) and the source hosts implied by other cases are ordinary alert sources, not allowlisted scanners."
+    ]
+  },
+  "matchMode": "exact",
+  "records": [
+    {
+      "ip": "10.20.0.31",
+      "label": "approved vulnerability scanner",
+      "addedBy": "soc",
+      "addedOn": "2025-11-03",
+      "reason": "Corporate Nessus scanner; its vulnerability-scan signatures are documented false positives.",
+      "evalReferences": ["01", "04", "05", "08", "11"]
+    }
+  ]
+}

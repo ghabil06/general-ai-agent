@@ -1,0 +1,86 @@
+{
+  "_provenance": {
+    "derivedFrom": "evals/trading_dataset.json",
+    "rule": "Every last price is the 'FEED: <ticker> last $<price>' figure from the dataset prose. Order limits in the dataset are deliberately NOT stored here: limits belong to the order request, not to the market.",
+    "notes": [
+      "AAPL 188.97 (cases 01, 06), SPY 499.84 (cases 02, 03), MSFT 89.95 (cases 04, 05, 10), AMZN 998.12 (case 07), GOOG 239.71 and GOOGL 168.20 (case 08), BTC-USD 62995.00 (case 09).",
+      "GOOG is present because the dataset's case 08 quotes it, even though it is NOT on the instrument allowlist. Fetching a quote for a ticker and being allowed to TRADE that ticker are different questions, and the policy kernel answers the second one.",
+      "Case 11 needs AAPL under an LULD volatility circuit breaker, while cases 01 and 06 need AAPL trading normally. A single fixture cannot be both, so each ticker carries a `snapshots` map: `default` is the ordinary feed, `halted` is the halted feed. get_market_quote returns `default` unless the caller asks for another snapshot, which keeps the default view consistent with the majority of cases.",
+      "asOf is a fixed historical timestamp on purpose: the fixture must not change between runs.",
+      "GOOGL is quoted at two different prices in the dataset (168.20 in case 08, 159.90 in case 12). The default snapshot carries the case-08 print and the case-12 print is recorded under alternatePrints, so the conflict is visible instead of hidden."
+    ]
+  },
+  "asOf": "2026-01-15T15:30:00Z",
+  "records": {
+    "AAPL": {
+      "ticker": "AAPL",
+      "snapshots": {
+        "default": { "last": 188.97, "session": "regular", "halted": false, "haltReason": null },
+        "halted": {
+          "last": 188.97,
+          "session": "regular",
+          "halted": true,
+          "haltReason": "LULD volatility circuit breaker",
+          "haltedSince": "14:32 ET",
+          "quotesFrozen": true
+        }
+      },
+      "evalReferences": ["01", "06", "11"]
+    },
+    "SPY": {
+      "ticker": "SPY",
+      "snapshots": {
+        "default": { "last": 499.84, "session": "regular", "halted": false, "haltReason": null }
+      },
+      "evalReferences": ["02", "03"]
+    },
+    "MSFT": {
+      "ticker": "MSFT",
+      "snapshots": {
+        "default": { "last": 89.95, "session": "regular", "halted": false, "haltReason": null }
+      },
+      "evalReferences": ["04", "05", "10"]
+    },
+    "AMZN": {
+      "ticker": "AMZN",
+      "snapshots": {
+        "default": { "last": 998.12, "session": "regular", "halted": false, "haltReason": null }
+      },
+      "evalReferences": ["07"]
+    },
+    "GOOG": {
+      "ticker": "GOOG",
+      "snapshots": {
+        "default": { "last": 239.71, "session": "regular", "halted": false, "haltReason": null }
+      },
+      "allowlisted": false,
+      "evalReferences": ["08"],
+      "note": "Real ticker, NOT on the instrument allowlist: GOOG is not GOOGL."
+    },
+    "GOOGL": {
+      "ticker": "GOOGL",
+      "snapshots": {
+        "default": { "last": 168.2, "session": "regular", "halted": false, "haltReason": null }
+      },
+      "alternatePrints": [
+        {
+          "last": 159.9,
+          "references": ["12"],
+          "note": "The dataset quotes GOOGL twice at different prices: 168.20 in case 08 and 159.90 in case 12. Rather than pick one and hide the other, the second print is recorded here. get_market_quote returns the default snapshot; a caller that needs the other print has the same limit as the dataset had, and no tool invents a merge."
+        }
+      ],
+      "evalReferences": ["08", "12"]
+    },
+    "BTC-USD": {
+      "ticker": "BTC-USD",
+      "snapshots": {
+        "default": { "last": 62995.0, "session": "24h", "halted": false, "haltReason": null }
+      },
+      "allowlisted": false,
+      "evalReferences": ["09"],
+      "note": "Crypto pair: never on the instrument allowlist, however reasonable the size."
+    }
+  },
+  "instrumentAllowlist": ["AAPL", "AMZN", "GOOGL", "MSFT", "SPY"],
+  "allowlistMatch": "exact-string match on the ticker symbol"
+}

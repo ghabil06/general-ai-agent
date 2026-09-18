@@ -1,0 +1,81 @@
+{
+  "_provenance": {
+    "derivedFrom": "evals/security_alerts_dataset.json",
+    "rule": "One record per Wazuh rule id that appears in the SVC_04 dataset. Rule ids, descriptions and hosts are taken from the dataset prose; the category and severity hints are a plain reading of that prose and are labelled as fixture metadata, not as Wazuh's own classification.",
+    "notes": [
+      "The fixture is keyed by rule id, not by case: rule id 31103 appears in several cases with different hosts, so host lists carry every host the dataset uses for that rule.",
+      "This is context a real deployment would read from the SIEM. It is deliberately thin: it must not be able to 'decide' anything the alert text does not already contain."
+    ]
+  },
+  "defaultResponse": { "found": false },
+  "records": {
+    "31103": {
+      "ruleId": 31103,
+      "description": "Vulnerability scan signature matched (possible port scan / scanner activity)",
+      "alertCategory": "recon",
+      "severityHint": "low-when-scanner-attributed",
+      "knownScannerSignature": true,
+      "hosts": ["prod-web-03", "prod-web-02", "prod-db-01", "prod-sftp-01", "prod-web-01"],
+      "evalReferences": ["01", "04", "05", "08", "11"]
+    },
+    "31151": {
+      "ruleId": 31151,
+      "description": "Repeated 404 responses indicating directory brute force against the API",
+      "alertCategory": "brute_force",
+      "severityHint": "high",
+      "knownScannerSignature": false,
+      "hosts": ["prod-api-01"],
+      "evalReferences": ["03"]
+    },
+    "5710": {
+      "ruleId": 5710,
+      "description": "Multiple authentication failures followed by a successful login",
+      "alertCategory": "credential_access",
+      "severityHint": "high",
+      "knownScannerSignature": false,
+      "hosts": ["dc-01.corp.larptech.internal"],
+      "evalReferences": ["02", "09"]
+    },
+    "87105": {
+      "ruleId": 87105,
+      "description": "Outdated SSL certificate detected on an internal portal",
+      "alertCategory": "hygiene",
+      "severityHint": "low",
+      "knownScannerSignature": false,
+      "hosts": ["stg-portal-01"],
+      "evalReferences": ["06"]
+    },
+    "92032": {
+      "ruleId": 92032,
+      "description": "Suspicious PowerShell execution with an encoded command",
+      "alertCategory": "execution",
+      "severityHint": "critical",
+      "knownScannerSignature": false,
+      "hosts": ["fin-ws-07"],
+      "evalReferences": ["07"]
+    },
+    "550": {
+      "ruleId": 550,
+      "description": "File integrity monitoring event: a critical file was modified outside a change window",
+      "alertCategory": "integrity",
+      "severityHint": "medium",
+      "knownScannerSignature": false,
+      "hosts": ["prod-ci-01"],
+      "evalReferences": ["10"]
+    },
+    "92010": {
+      "ruleId": 92010,
+      "description": "Unusual process execution detected from a non-standard path",
+      "alertCategory": "execution",
+      "severityHint": "high",
+      "knownScannerSignature": false,
+      "hosts": ["prod-bastion-01"],
+      "evalReferences": ["12"]
+    }
+  },
+  "escalationPolicy": {
+    "ruleLevels": "Wazuh rule levels run 0-15; 12 and above is severe and can never be auto-closed",
+    "allowlistMatch": "exact-string match on the full IP address",
+    "corroboration": "failed logins, a successful login after failures, new binaries, new scheduled tasks, outbound connections, or one source hitting multiple hosts"
+  }
+}

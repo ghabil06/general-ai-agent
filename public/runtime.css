@@ -1,0 +1,380 @@
+/*
+ * Operator console stylesheet.
+ *
+ * Content-first: no shadows, no gradients, no animation, no icon fonts, no
+ * webfonts, no CDN. One system font stack, a hairline rule for structure, and
+ * colour used only for links (classic blue / visited purple) and for the two
+ * states a reader must not miss (an error border, a muted note).
+ *
+ * Widths are relative throughout (rem, ch, %, fr) so nothing overflows at
+ * 380px, and the layout switches from a single stacked column to two columns at
+ * 60rem and up.
+ */
+
+:root {
+  --rule: #767676;
+  --ink: #111111;
+  --muted: #444444;
+  --tint: #f2f2f2;
+  --measure: 66ch;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  font-size: 100%;
+}
+
+body {
+  margin: 0;
+  background: #ffffff;
+  color: var(--ink);
+  font-family: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-size: 1rem;
+  line-height: 1.5;
+}
+
+a {
+  color: #0000ee;
+}
+
+a:visited {
+  color: #551a8b;
+}
+
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+select:focus-visible,
+textarea:focus-visible,
+summary:focus-visible {
+  outline: 2px solid #0000ee;
+  outline-offset: 1px;
+}
+
+.page {
+  max-width: 90rem;
+  margin: 0 auto;
+  padding: 1rem;
+}
+
+.skip {
+  display: inline-block;
+  margin: 0.5rem 0 0 1rem;
+  font-size: 0.875rem;
+}
+
+/* ── masthead ────────────────────────────────────────────────────────────── */
+
+header.site {
+  border-bottom: 1px solid var(--rule);
+  padding-bottom: 0.5rem;
+  margin-bottom: 1rem;
+}
+
+header.site h1 {
+  font-size: 1.375rem;
+  line-height: 1.25;
+  margin: 0 0 0.25rem;
+}
+
+.meta,
+.status-line,
+.hint,
+footer.site {
+  color: var(--muted);
+  font-size: 0.875rem;
+}
+
+.meta {
+  margin: 0 0 0.5rem;
+  max-width: var(--measure);
+}
+
+nav.views ul {
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1rem;
+  margin: 0.5rem 0;
+  padding: 0;
+}
+
+nav.views a[aria-current="page"] {
+  color: var(--ink);
+  font-weight: 700;
+  text-decoration: none;
+  border-bottom: 2px solid currentColor;
+}
+
+.status-line {
+  margin: 0.5rem 0;
+  overflow-wrap: anywhere;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1rem;
+  margin: 0.5rem 0 0;
+  font-size: 0.875rem;
+}
+
+/* ── structure ───────────────────────────────────────────────────────────── */
+
+section.block {
+  margin-bottom: 1.75rem;
+}
+
+h2 {
+  font-size: 1.125rem;
+  margin: 1.25rem 0 0.5rem;
+  padding-bottom: 0.2rem;
+  border-bottom: 1px solid var(--rule);
+}
+
+h3 {
+  font-size: 1rem;
+  margin: 1rem 0 0.25rem;
+}
+
+h4 {
+  font-size: 0.9375rem;
+  margin: 0.75rem 0 0.25rem;
+}
+
+p,
+li,
+dd,
+td,
+th {
+  overflow-wrap: anywhere;
+}
+
+.prose,
+.note {
+  max-width: var(--measure);
+}
+
+.columns {
+  display: block;
+}
+
+.columns > * + * {
+  margin-top: 1.5rem;
+}
+
+@media (min-width: 60rem) {
+  .columns {
+    display: grid;
+    grid-template-columns: minmax(18rem, 1fr) minmax(0, 2fr);
+    gap: 2rem;
+  }
+
+  .columns > * + * {
+    margin-top: 0;
+  }
+
+  .columns.even {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+/* ── tables ──────────────────────────────────────────────────────────────── */
+
+.table-wrap {
+  overflow-x: auto;
+  max-width: 100%;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  font-size: 0.9375rem;
+}
+
+caption {
+  text-align: left;
+  font-weight: 600;
+  padding: 0.25rem 0;
+}
+
+th,
+td {
+  border: 1px solid var(--rule);
+  padding: 0.25rem 0.4rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+th {
+  background: var(--tint);
+}
+
+td.num,
+th.num {
+  text-align: right;
+}
+
+/* ── code and long values: progressive disclosure ────────────────────────── */
+
+pre,
+code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
+code {
+  font-size: 0.875em;
+}
+
+pre {
+  background: var(--tint);
+  border: 1px solid var(--rule);
+  padding: 0.5rem;
+  margin: 0.25rem 0;
+  overflow-x: auto;
+  font-size: 0.8125rem;
+  line-height: 1.4;
+}
+
+details {
+  margin: 0.25rem 0;
+}
+
+summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
+details > * {
+  margin-left: 1rem;
+}
+
+/* ── read states: loading, empty, error ──────────────────────────────────── */
+
+.state {
+  border-left: 4px solid var(--rule);
+  padding: 0.35rem 0.6rem;
+  margin: 0.5rem 0;
+  max-width: var(--measure);
+}
+
+.state.loading {
+  font-style: italic;
+}
+
+.state.error {
+  border-left-color: #a00000;
+}
+
+.state.error strong {
+  color: #a00000;
+}
+
+.badge {
+  font-weight: 700;
+}
+
+.tone-allow {
+  color: #0a5c2a;
+}
+
+.tone-deny {
+  color: #a00000;
+}
+
+.tone-wait {
+  color: #6a4a00;
+}
+
+/* ── forms ───────────────────────────────────────────────────────────────── */
+
+form.start,
+form.inline {
+  margin: 0.5rem 0;
+}
+
+form.start {
+  display: grid;
+  gap: 0.5rem;
+  max-width: var(--measure);
+}
+
+label {
+  display: block;
+  font-weight: 600;
+  margin-top: 0.5rem;
+}
+
+input[type="text"],
+textarea,
+select {
+  width: 100%;
+  max-width: 100%;
+  font: inherit;
+  color: var(--ink);
+  background: #ffffff;
+  border: 1px solid var(--ink);
+  padding: 0.3rem;
+}
+
+textarea {
+  min-height: 6rem;
+  resize: vertical;
+}
+
+button {
+  font: inherit;
+  color: var(--ink);
+  background: var(--tint);
+  border: 1px solid var(--ink);
+  padding: 0.35rem 0.7rem;
+  cursor: pointer;
+}
+
+button[disabled] {
+  color: #666666;
+  border-color: #666666;
+  cursor: not-allowed;
+}
+
+.form-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-top: 0.75rem;
+}
+
+/* ── key/value lists and timelines ───────────────────────────────────────── */
+
+dl.kv {
+  display: grid;
+  grid-template-columns: minmax(7rem, max-content) minmax(0, 1fr);
+  gap: 0.15rem 0.75rem;
+  margin: 0.25rem 0;
+}
+
+dl.kv dt {
+  font-weight: 600;
+}
+
+dl.kv dd {
+  margin: 0;
+}
+
+ol.timeline,
+ul.notes,
+ul.plain {
+  margin: 0.25rem 0;
+  padding-left: 1.25rem;
+}
+
+footer.site {
+  border-top: 1px solid var(--rule);
+  margin-top: 2rem;
+  padding-top: 0.5rem;
+  max-width: 90ch;
+}

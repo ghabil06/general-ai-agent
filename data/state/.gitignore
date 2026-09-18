@@ -1,0 +1,8 @@
+# Runtime state written by the agent runtime lives here and is NOT committed.
+#
+# `data/fixtures/` — committed, hand-authored, derived from the eval datasets.
+# `data/state/`    — append-only JSONL written at runtime (runs, events,
+#                    approvals, audit, incidents, paper orders, memory, traces).
+#                    Delete it freely: it is evidence, not configuration.
+*
+!.gitignore

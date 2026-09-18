@@ -4,6 +4,9 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { exec } from 'child_process';
 
+import { createRuntime } from './src/index.mjs';
+import { createRuntimeApi, API_ERROR_CODES, API_STATUS_BY_CODE, MAX_BODY_BYTES } from './src/api/index.mjs';
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
@@ -312,245 +315,466 @@ function simulateAgentExecution(agent, caseData, customText) {
   };
 }
 
-// Server Creation
-const server = http.createServer((req, res) => {
-  const parsedUrl = new URL(req.url, `http://${req.headers.host}`);
-  const pathname = parsedUrl.pathname;
-  const method = req.method;
+/* ──────────────────────────────────────────────────────────────────────────
+ * Runtime API binding (call 3)
+ *
+ * The runtime is built LAZILY, on the first request to /api/runtime/*. Three
+ * reasons, in order of importance:
+ *
+ *   1. The legacy dashboard must keep working even if the runtime cannot be
+ *      constructed (a bad storage path, a read-only filesystem). A failure
+ *      there becomes a structured 503 on the runtime routes instead of a
+ *      dashboard that does not boot.
+ *   2. `createRuntime()` reads the environment; doing it per request would
+ *      re-read config on every call for no benefit.
+ *   3. Tests can start this server against a temp storage directory without
+ *      touching the repository's `data/state/`.
+ * ────────────────────────────────────────────────────────────────────────── */
 
-  // Set CORS headers
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+/**
+ * @param {object} [options]
+ * @param {string} [options.storageDir]  override; default is the runtime's own
+ * @returns {{api: object|null, runtime: object|null, error: Error|null, requestIdSafe: string|null}}
+ */
+export function createRuntimeBinding({ storageDir = null } = {}) {
+  let state = null;
 
-  if (method === 'OPTIONS') {
-    res.writeHead(204);
-    res.end();
-    return;
-  }
-
-  // --- API Endpoints ---
-
-  // 1. Overview
-  if (pathname === '/api/overview' && method === 'GET') {
-    const invoices = readJsonFile('evals/invoices_dataset.json') || [];
-    const alerts = readJsonFile('evals/security_alerts_dataset.json') || [];
-    const trades = readJsonFile('evals/trading_dataset.json') || [];
-    const replaySample = readTextFile('n8n_exports/replay_sample.jsonl').trim().split('\n').filter(Boolean);
-
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({
-      projectName: 'Larptech Agent Prompts (Bounded Agency)',
-      animeVersion: '4.5.0',
-      agents: {
-        svc_03: {
-          id: 'svc_03',
-          name: 'Accounts Payable Reconciliation',
-          boundary: '$500.00 Autonomous Approval Cap',
-          datasetSize: invoices.length,
-          guardrail: 'Secondary Compliance Guardrail (Dual Enforced)',
-          status: 'Operational'
-        },
-        svc_04: {
-          id: 'svc_04',
-          name: 'Wazuh Security Triage',
-          boundary: 'Level 12 Critical Incident Boundary',
-          datasetSize: alerts.length,
-          guardrail: 'Allowlist & Corroboration Triage Gate',
-          status: 'Operational'
-        },
-        svc_06: {
-          id: 'svc_06',
-          name: 'Paper Trading Strategy',
-          boundary: '$10,000 Notional Cap (Paper Account Only)',
-          datasetSize: trades.length,
-          guardrail: 'Max Drawdown Circuit Breaker & Long-Only Bound',
-          status: 'Operational'
-        }
-      },
-      stats: {
-        totalEvalCases: invoices.length + alerts.length + trades.length,
-        auditReplayRows: replaySample.length,
-        gatesPassed: 3,
-        systemMode: 'Bounded-Agency Enforcement Active'
-      }
-    }));
-    return;
-  }
-
-  // 2. Cases per agent
-  if (pathname === '/api/cases' && method === 'GET') {
-    const agent = parsedUrl.searchParams.get('agent') || 'svc_03';
-    let cases = [];
-    if (agent === 'svc_03') {
-      cases = readJsonFile('evals/invoices_dataset.json') || [];
-    } else if (agent === 'svc_04') {
-      cases = readJsonFile('evals/security_alerts_dataset.json') || [];
-    } else {
-      cases = readJsonFile('evals/trading_dataset.json') || [];
+  function build() {
+    try {
+      const runtime = createRuntime(storageDir ? { storageDir } : {});
+      return { api: createRuntimeApi({ runtime }), runtime, error: null };
+    } catch (error) {
+      return { api: null, runtime: null, error };
     }
-
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ agent, cases }));
-    return;
   }
 
-  // 3. Prompts
-  if (pathname === '/api/prompts' && method === 'GET') {
-    const agent = parsedUrl.searchParams.get('agent') || 'svc_03';
-    let promptText = '';
-    let guardrailText = '';
+  return {
+    /** @returns {{api: object|null, runtime: object|null, error: Error|null}} */
+    get() {
+      if (!state) state = build();
+      return state;
+    },
+    storageDir,
+  };
+}
 
-    if (agent === 'svc_03') {
-      promptText = readTextFile('prompts/svc_03/invoice_agent.md');
-      guardrailText = readTextFile('prompts/svc_03/guardrail.md');
-    } else if (agent === 'svc_04') {
-      promptText = readTextFile('prompts/svc_04/security_triage_agent.md');
-    } else {
-      promptText = readTextFile('prompts/svc_06/paper_trading_agent.md');
-    }
+/** Read a request body with a hard byte limit. Never throws. */
+function readBody(req, limit = MAX_BODY_BYTES) {
+  return new Promise((resolve) => {
+    const chunks = [];
+    let size = 0;
+    let tooLarge = false;
 
-    res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ agent, promptText, guardrailText }));
-    return;
-  }
-
-  // 4. Simulate Execution
-  if (pathname === '/api/simulate' && method === 'POST') {
-    let body = '';
-    req.on('data', chunk => { body += chunk; });
-    req.on('end', () => {
-      try {
-        const payload = JSON.parse(body || '{}');
-        const agent = payload.agent || 'svc_03';
-        const caseIndex = payload.caseIndex ?? 0;
-        const customText = payload.customText;
-
-        let cases = [];
-        if (agent === 'svc_03') cases = readJsonFile('evals/invoices_dataset.json') || [];
-        else if (agent === 'svc_04') cases = readJsonFile('evals/security_alerts_dataset.json') || [];
-        else cases = readJsonFile('evals/trading_dataset.json') || [];
-
-        const targetCase = cases[caseIndex] || cases[0];
-        const result = simulateAgentExecution(agent, targetCase, customText);
-
-        res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(result));
-      } catch (err) {
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: err.message }));
+    req.on('data', (chunk) => {
+      size += chunk.length;
+      if (tooLarge) return;
+      if (size > limit) {
+        tooLarge = true;
+        chunks.length = 0;
+        return;
       }
+      chunks.push(chunk);
     });
-    return;
+    req.on('end', () => resolve({ rawBody: tooLarge ? '' : Buffer.concat(chunks).toString('utf8'), tooLarge }));
+    req.on('error', () => resolve({ rawBody: '', tooLarge: false }));
+  });
+}
+
+/** Serialise a router response onto the socket. */
+function writeRuntimeResponse(res, response) {
+  res.writeHead(response.status, response.headers);
+  res.end(response.body);
+}
+
+/** Structured JSON failure for the case where the runtime could not be built. */
+function writeRuntimeUnavailable(res, error) {
+  const body = {
+    error: {
+      code: API_ERROR_CODES.RUNTIME_UNAVAILABLE,
+      message: `the runtime could not be constructed in this process: ${error?.message ?? String(error)}`,
+      details: { name: error?.name ?? 'Error' },
+    },
+  };
+  res.writeHead(API_STATUS_BY_CODE[API_ERROR_CODES.RUNTIME_UNAVAILABLE], {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Cache-Control': 'no-store',
+  });
+  res.end(`${JSON.stringify(body, null, 2)}\n`);
+}
+
+/**
+ * Serve `req` from the runtime API, or return false when it is not a runtime
+ * path (so the caller keeps its own routing).
+ *
+ * @returns {Promise<boolean>}
+ */
+async function serveRuntimeApi(req, res, pathname, searchParams, binding) {
+  const prefix = '/api/runtime';
+  if (pathname !== prefix && !pathname.startsWith(`${prefix}/`)) return false;
+
+  const { api, error } = binding.get();
+  if (!api) {
+    writeRuntimeUnavailable(res, error);
+    return true;
   }
 
-  // 5. Run Verification Gate
-  if (pathname === '/api/run-gate' && method === 'POST') {
-    let body = '';
-    req.on('data', chunk => { body += chunk; });
-    req.on('end', () => {
-      try {
-        const payload = JSON.parse(body || '{}');
-        const gate = payload.gate || 'validate';
+  try {
+    const { rawBody, tooLarge } = await readBody(req);
+    const response = await api.handle({ method: req.method, pathname, searchParams, rawBody, tooLarge });
+    // `handle` returns null only for a non-runtime path, which this function has
+    // already excluded; treat it as a bug rather than falling through to a
+    // static file, because a runtime path must never be answered by one.
+    if (!response) {
+      writeRuntimeUnavailable(res, new Error('the runtime router did not recognise a runtime path'));
+      return true;
+    }
+    writeRuntimeResponse(res, response);
+  } catch (err) {
+    res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8', 'Cache-Control': 'no-store' });
+    res.end(
+      `${JSON.stringify(
+        { error: { code: API_ERROR_CODES.INTERNAL, message: `the runtime API failed: ${err?.message ?? String(err)}` } },
+        null,
+        2,
+      )}\n`,
+    );
+  }
+  return true;
+}
 
-        let command = 'node evals/validate_dataset.mjs';
-        if (gate === 'validate_security') command = 'node evals/validate_security_dataset.mjs';
-        else if (gate === 'validate_trading') command = 'node evals/validate_trading_dataset.mjs';
-        else if (gate === 'validate_all') command = 'node evals/validate_dataset.mjs && node evals/validate_security_dataset.mjs && node evals/validate_trading_dataset.mjs';
-        else if (gate === 'test_nodes') command = 'node n8n_exports/test_parse_nodes.mjs';
-        else if (gate === 'replay') command = 'node n8n_exports/replay_history.mjs --dry-run --file n8n_exports/replay_sample.jsonl';
-        else if (gate === 'offline_oracle') command = 'node evals/check_results.mjs naive-results.json --expect-failures 9 --total 12 || echo "Check complete"';
+/**
+ * The HTTP request handler.
+ *
+ * Route order is the compatibility guarantee: the runtime API answers only
+ * `/api/runtime/*`, every legacy endpoint keeps its own branch, and the static
+ * handler still falls back to `index.html` for anything else the public
+ * directory does not hold.
+ */
+export function createRequestHandler({ binding = createRuntimeBinding() } = {}) {
+  return function handleRequest(req, res) {
+    const parsedUrl = new URL(req.url, `http://${req.headers.host}`);
+    const pathname = parsedUrl.pathname;
+    const method = req.method;
 
-        const startTime = Date.now();
-        exec(command, { cwd: __dirname }, (error, stdout, stderr) => {
-          const durationMs = Date.now() - startTime;
+    // Set CORS headers
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+    if (method === 'OPTIONS') {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
+    /* --- Runtime API (call 3): /api/runtime/* only ------------------------ */
+    if (pathname === '/api/runtime' || pathname.startsWith('/api/runtime/')) {
+      void serveRuntimeApi(req, res, pathname, parsedUrl.searchParams, binding);
+      return;
+    }
+
+    // --- API Endpoints ---
+
+    // 1. Overview
+    if (pathname === '/api/overview' && method === 'GET') {
+      const invoices = readJsonFile('evals/invoices_dataset.json') || [];
+      const alerts = readJsonFile('evals/security_alerts_dataset.json') || [];
+      const trades = readJsonFile('evals/trading_dataset.json') || [];
+      const replaySample = readTextFile('n8n_exports/replay_sample.jsonl').trim().split('\n').filter(Boolean);
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({
+        projectName: 'Larptech Agent Prompts (Bounded Agency)',
+        animeVersion: '4.5.0',
+        agents: {
+          svc_03: {
+            id: 'svc_03',
+            name: 'Accounts Payable Reconciliation',
+            boundary: '$500.00 Autonomous Approval Cap',
+            datasetSize: invoices.length,
+            guardrail: 'Secondary Compliance Guardrail (Dual Enforced)',
+            status: 'Operational'
+          },
+          svc_04: {
+            id: 'svc_04',
+            name: 'Wazuh Security Triage',
+            boundary: 'Level 12 Critical Incident Boundary',
+            datasetSize: alerts.length,
+            guardrail: 'Allowlist & Corroboration Triage Gate',
+            status: 'Operational'
+          },
+          svc_06: {
+            id: 'svc_06',
+            name: 'Paper Trading Strategy',
+            boundary: '$10,000 Notional Cap (Paper Account Only)',
+            datasetSize: trades.length,
+            guardrail: 'Max Drawdown Circuit Breaker & Long-Only Bound',
+            status: 'Operational'
+          }
+        },
+        stats: {
+          totalEvalCases: invoices.length + alerts.length + trades.length,
+          auditReplayRows: replaySample.length,
+          gatesPassed: 3,
+          systemMode: 'Bounded-Agency Enforcement Active'
+        }
+      }));
+      return;
+    }
+
+    // 2. Cases per agent
+    if (pathname === '/api/cases' && method === 'GET') {
+      const agent = parsedUrl.searchParams.get('agent') || 'svc_03';
+      let cases = [];
+      if (agent === 'svc_03') {
+        cases = readJsonFile('evals/invoices_dataset.json') || [];
+      } else if (agent === 'svc_04') {
+        cases = readJsonFile('evals/security_alerts_dataset.json') || [];
+      } else {
+        cases = readJsonFile('evals/trading_dataset.json') || [];
+      }
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ agent, cases }));
+      return;
+    }
+
+    // 3. Prompts
+    if (pathname === '/api/prompts' && method === 'GET') {
+      const agent = parsedUrl.searchParams.get('agent') || 'svc_03';
+      let promptText = '';
+      let guardrailText = '';
+
+      if (agent === 'svc_03') {
+        promptText = readTextFile('prompts/svc_03/invoice_agent.md');
+        guardrailText = readTextFile('prompts/svc_03/guardrail.md');
+      } else if (agent === 'svc_04') {
+        promptText = readTextFile('prompts/svc_04/security_triage_agent.md');
+      } else {
+        promptText = readTextFile('prompts/svc_06/paper_trading_agent.md');
+      }
+
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ agent, promptText, guardrailText }));
+      return;
+    }
+
+    // 4. Simulate Execution
+    //
+    // LEGACY SIMULATION, deliberately unchanged. This endpoint does not run the
+    // runtime: it evaluates a payload against hardcoded stage timings and the
+    // same keyword checks the dashboard has always used. Its response shape is
+    // byte-for-byte what `public/app.js` reads, so it is left alone; the two
+    // marker fields below are ADDITIVE and no existing consumer reads them.
+    // Real runs live at POST /api/runtime/agents/:id/runs.
+    if (pathname === '/api/simulate' && method === 'POST') {
+      let body = '';
+      req.on('data', chunk => { body += chunk; });
+      req.on('end', () => {
+        try {
+          const payload = JSON.parse(body || '{}');
+          const agent = payload.agent || 'svc_03';
+          const caseIndex = payload.caseIndex ?? 0;
+          const customText = payload.customText;
+
+          let cases = [];
+          if (agent === 'svc_03') cases = readJsonFile('evals/invoices_dataset.json') || [];
+          else if (agent === 'svc_04') cases = readJsonFile('evals/security_alerts_dataset.json') || [];
+          else cases = readJsonFile('evals/trading_dataset.json') || [];
+
+          const targetCase = cases[caseIndex] || cases[0];
+          const result = simulateAgentExecution(agent, targetCase, customText);
+
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({
-            gate,
-            command,
-            success: !error || error.code === 0,
-            code: error ? error.code : 0,
-            stdout: stdout || '',
-            stderr: stderr || '',
-            durationMs
+            ...result,
+            simulated: true,
+            deprecated: true,
+            simulationNotice:
+              'Legacy simulation: deterministic keyword evaluation with fixed stage timings, not a runtime run. ' +
+              'Use POST /api/runtime/agents/svc_03/runs for a real run through the runtime.'
           }));
+        } catch (err) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+      return;
+    }
+
+    // 5. Run Verification Gate
+    if (pathname === '/api/run-gate' && method === 'POST') {
+      let body = '';
+      req.on('data', chunk => { body += chunk; });
+      req.on('end', () => {
+        try {
+          const payload = JSON.parse(body || '{}');
+          const gate = payload.gate || 'validate';
+
+          let command = 'node evals/validate_dataset.mjs';
+          if (gate === 'validate_security') command = 'node evals/validate_security_dataset.mjs';
+          else if (gate === 'validate_trading') command = 'node evals/validate_trading_dataset.mjs';
+          else if (gate === 'validate_all') command = 'node evals/validate_dataset.mjs && node evals/validate_security_dataset.mjs && node evals/validate_trading_dataset.mjs';
+          else if (gate === 'test_nodes') command = 'node n8n_exports/test_parse_nodes.mjs';
+          else if (gate === 'replay') command = 'node n8n_exports/replay_history.mjs --dry-run --file n8n_exports/replay_sample.jsonl';
+          else if (gate === 'offline_oracle') command = 'node evals/check_results.mjs naive-results.json --expect-failures 9 --total 12 || echo "Check complete"';
+
+          const startTime = Date.now();
+          exec(command, { cwd: __dirname }, (error, stdout, stderr) => {
+            const durationMs = Date.now() - startTime;
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({
+              gate,
+              command,
+              success: !error || error.code === 0,
+              code: error ? error.code : 0,
+              stdout: stdout || '',
+              stderr: stderr || '',
+              durationMs
+            }));
+          });
+        } catch (err) {
+          res.writeHead(500, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ error: err.message }));
+        }
+      });
+      return;
+    }
+
+    // 6. Audit Logs
+    if (pathname === '/api/audit-logs' && method === 'GET') {
+      try {
+        const content = readTextFile('n8n_exports/replay_sample.jsonl');
+        const lines = content.trim().split('\n').filter(Boolean);
+        const rows = lines.map(line => {
+          try {
+            return JSON.parse(line);
+          } catch {
+            return { raw: line };
+          }
         });
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ rows }));
       } catch (err) {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: err.message }));
       }
+      return;
+    }
+
+    // --- Static Files ---
+
+    // Handle vendor anime.js request
+    if (pathname === '/vendor/anime.umd.min.js' || pathname === '/vendor/anime.js') {
+      const animePath = path.join(__dirname, 'node_modules', 'animejs', 'dist', 'bundles', 'anime.umd.min.js');
+      if (fs.existsSync(animePath)) {
+        res.writeHead(200, { 'Content-Type': 'application/javascript; charset=utf-8' });
+        fs.createReadStream(animePath).pipe(res);
+        return;
+      }
+    }
+
+    // Handle vendor anime.esm.min.js request
+    if (pathname === '/vendor/anime.esm.min.js') {
+      const animePath = path.join(__dirname, 'node_modules', 'animejs', 'dist', 'bundles', 'anime.esm.min.js');
+      if (fs.existsSync(animePath)) {
+        res.writeHead(200, { 'Content-Type': 'application/javascript; charset=utf-8' });
+        fs.createReadStream(animePath).pipe(res);
+        return;
+      }
+    }
+
+    // Operator console (call 3). An explicit alias, checked BEFORE the
+    // index.html fallback below, so `/console` cannot be answered by the
+    // dashboard. `public/runtime.html` is also reachable directly.
+    if (pathname === '/console' || pathname === '/console/' || pathname === '/runtime') {
+      const consolePath = path.join(PUBLIC_DIR, 'runtime.html');
+      if (fs.existsSync(consolePath)) {
+        res.writeHead(200, { 'Content-Type': MIME_TYPES['.html'] });
+        fs.createReadStream(consolePath).pipe(res);
+        return;
+      }
+    }
+
+    // Serve static files from public/
+    let filePath = path.join(PUBLIC_DIR, pathname === '/' ? 'index.html' : pathname);
+
+    if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
+      filePath = path.join(PUBLIC_DIR, 'index.html');
+    }
+
+    const ext = path.extname(filePath).toLowerCase();
+    const contentType = MIME_TYPES[ext] || 'application/octet-stream';
+
+    fs.readFile(filePath, (err, content) => {
+      if (err) {
+        res.writeHead(404, { 'Content-Type': 'text/plain' });
+        res.end('404 Not Found');
+      } else {
+        res.writeHead(200, { 'Content-Type': contentType });
+        res.end(content);
+      }
     });
-    return;
-  }
+  };
+}
 
-  // 6. Audit Logs
-  if (pathname === '/api/audit-logs' && method === 'GET') {
-    try {
-      const content = readTextFile('n8n_exports/replay_sample.jsonl');
-      const lines = content.trim().split('\n').filter(Boolean);
-      const rows = lines.map(line => {
-        try {
-          return JSON.parse(line);
-        } catch {
-          return { raw: line };
-        }
+/**
+ * Start the server.
+ *
+ * @param {object} [options]
+ * @param {number|string} [options.port]  0 picks an ephemeral port (tests)
+ * @param {string} [options.storageDir]   runtime storage override
+ * @param {string} [options.host]
+ * @param {boolean} [options.quiet]
+ * @returns {Promise<{server, port, url, binding, close: Function}>}
+ */
+export function startServer({ port = PORT, storageDir = null, host = null, quiet = false } = {}) {
+  const binding = createRuntimeBinding({ storageDir });
+  const server = http.createServer(createRequestHandler({ binding }));
+
+  return new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(port, host ?? undefined, () => {
+      const address = server.address();
+      const boundPort = typeof address === 'object' && address ? address.port : Number(port);
+      const url = `http://${host ?? 'localhost'}:${boundPort}`;
+      if (!quiet) {
+        console.log(`\n======================================================`);
+        console.log(`🚀 Larptech Bounded-Agency Agent Suite`);
+        console.log(`✨ Animated UI with Anime.js v4.5.0`);
+        console.log(`🌐 Dashboard running at: http://localhost:${boundPort}`);
+        console.log(`🧭 Operator console at:  http://localhost:${boundPort}/console`);
+        console.log(`🔌 Runtime API at:       http://localhost:${boundPort}/api/runtime/health`);
+        console.log(`======================================================\n`);
+      }
+      resolve({
+        server,
+        port: boundPort,
+        url,
+        binding,
+        /** @returns {Promise<void>} */
+        close: () =>
+          new Promise((done) => {
+            server.close(() => done());
+          }),
       });
-      res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ rows }));
-    } catch (err) {
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ error: err.message }));
-    }
-    return;
-  }
-
-  // --- Static Files ---
-
-  // Handle vendor anime.js request
-  if (pathname === '/vendor/anime.umd.min.js' || pathname === '/vendor/anime.js') {
-    const animePath = path.join(__dirname, 'node_modules', 'animejs', 'dist', 'bundles', 'anime.umd.min.js');
-    if (fs.existsSync(animePath)) {
-      res.writeHead(200, { 'Content-Type': 'application/javascript; charset=utf-8' });
-      fs.createReadStream(animePath).pipe(res);
-      return;
-    }
-  }
-
-  // Handle vendor anime.esm.min.js request
-  if (pathname === '/vendor/anime.esm.min.js') {
-    const animePath = path.join(__dirname, 'node_modules', 'animejs', 'dist', 'bundles', 'anime.esm.min.js');
-    if (fs.existsSync(animePath)) {
-      res.writeHead(200, { 'Content-Type': 'application/javascript; charset=utf-8' });
-      fs.createReadStream(animePath).pipe(res);
-      return;
-    }
-  }
-
-  // Serve static files from public/
-  let filePath = path.join(PUBLIC_DIR, pathname === '/' ? 'index.html' : pathname);
-
-  if (!fs.existsSync(filePath) || fs.statSync(filePath).isDirectory()) {
-    filePath = path.join(PUBLIC_DIR, 'index.html');
-  }
-
-  const ext = path.extname(filePath).toLowerCase();
-  const contentType = MIME_TYPES[ext] || 'application/octet-stream';
-
-  fs.readFile(filePath, (err, content) => {
-    if (err) {
-      res.writeHead(404, { 'Content-Type': 'text/plain' });
-      res.end('404 Not Found');
-    } else {
-      res.writeHead(200, { 'Content-Type': contentType });
-      res.end(content);
-    }
+    });
   });
-});
+}
 
-server.listen(PORT, () => {
-  console.log(`\n======================================================`);
-  console.log(`🚀 Larptech Bounded-Agency Agent Suite`);
-  console.log(`✨ Animated UI with Anime.js v4.5.0`);
-  console.log(`🌐 Dashboard running at: http://localhost:${PORT}`);
-  console.log(`======================================================\n`);
-});
+/** True when this file is the process entry point (`node server.mjs`). */
+export function isMainModule() {
+  const entry = process.argv[1];
+  if (!entry) return false;
+  const resolved = path.resolve(entry);
+  return process.platform === 'win32'
+    ? resolved.toLowerCase() === __filename.toLowerCase()
+    : resolved === __filename;
+}
+
+if (isMainModule()) {
+  startServer().catch((error) => {
+    console.error('failed to start server:', error);
+    process.exitCode = 1;
+  });
+}

@@ -333,3 +333,11 @@ body { background: var(--bg-0); color: var(--text); font-family: var(--font); li
   .pipe-line { display: none; }
   .topbar-center { display: none; }
 }
+
+/* === RUNTIME CONSOLE LINK (call 3) ===
+   Additive only: one anchor in the top bar, styled to match the existing
+   chrome so the dashboard layout is unchanged. `public/runtime.html` is a
+   separate, self-contained page with its own stylesheet. */
+.console-link { font-family: var(--mono); font-size: 0.72rem; letter-spacing: 0.04em; text-transform: uppercase; color: var(--cyan); text-decoration: none; border: 1px solid rgba(0,224,255,0.28); background: rgba(0,224,255,0.08); padding: 6px 12px; border-radius: var(--r-full); white-space: nowrap; transition: background 0.2s, border-color 0.2s; }
+.console-link:hover, .console-link:focus-visible { background: rgba(0,224,255,0.16); border-color: rgba(0,224,255,0.5); }
+@media (max-width: 720px) { .console-link { font-size: 0.62rem; padding: 5px 8px; } }

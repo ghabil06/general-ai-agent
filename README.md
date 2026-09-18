@@ -17,6 +17,80 @@ account, with no real-money routing path anywhere.
 - `evals/` — datasets, assertions, fixtures and the deterministic gates for all three agents. See `evals/README.md`.
 - `prompts/svc_01/` — reserved for future marketing-agent prompts.
 - `n8n_exports/` — importable n8n workflow for SVC_03 (dynamic prompt fetch, deterministic guardrail, shadow-mode audit log). See `n8n_exports/README.md`.
+- `src/` — the agent runtime: state machine, budgets, model router and providers, tool registry and executor, a policy kernel with the SVC boundaries as code, approvals, JSONL stores, events/traces/audit and memory. See `docs/ARCHITECTURE.md`.
+- `src/api/` — the runtime HTTP API as a library (router, handlers, response projections, the offline fixture layer). Mounted by `server.mjs` behind `/api/runtime`.
+- `public/` — `index.html`/`app.js`/`style.css` are the original animated dashboard; `runtime.html`/`runtime.js`/`runtime.css` are the operator console served at `/console`.
+- `docs/ARCHITECTURE.md` — repository audit (what is real, simulated, configuration-only or missing) and the target architecture map.
+- `docs/GOAL.md`, `docs/HANDOVER.md`, `docs/VERIFICATION.md` — the call-3 goal and acceptance criteria, the handover, and the verification report.
+- `server.mjs` — the single HTTP entry point: the dashboard, the legacy simulation and the runtime API.
+- `data/fixtures/` — hand-authored fixtures derived from the eval datasets, each with a provenance block. `data/state/` holds runtime artefacts and is not committed.
+
+## Runtime checks
+
+The prompt/eval gates below are unchanged. The runtime adds its own offline gates:
+
+```bash
+npm test               # 232 unit tests, no network, no keys
+npm run test:integration   # 10 end-to-end offline runs, all three agents
+npm run verify:runtime     # builds a runtime, runs a full agent run, 32 invariant checks
+```
+
+> **Note (call 3):** those counts are from the first runtime call and are out of
+> date. The current numbers are unit **333**, integration **81**, API **27**,
+> `verify:runtime` **84 checks**, `eval:runtime` **all gates passed** — measured
+> on Node v22.22.0 and recorded in `docs/VERIFICATION.md`.
+
+## Runtime API and operator console (call 3)
+
+The runtime is served over HTTP and can be operated from a browser.
+
+```bash
+node server.mjs      # or: npm start
+```
+
+| URL | What it is |
+| --- | --- |
+| http://localhost:3000/ | the original dashboard (unchanged) |
+| http://localhost:3000/console | the operator console: agents, runs, approvals, tools, policies, the last evaluation report |
+| http://localhost:3000/api/runtime/health | the API's own health payload |
+
+- **HTTP API** — `src/api/`, mounted behind `/api/runtime`: list and start runs,
+  read a run's decision, state timeline, policy verdicts, tool calls, trace and
+  audit rows, resolve the approval queue, inspect the tool registry and the
+  policy inventory, and read the last `eval:runtime` report. JSON in and out,
+  structured errors, a request id on every response, and no secret in any
+  response. No new dependency; `server.mjs` is still a plain `node:http` server.
+- **Default provider is the deterministic double.** A run started offline
+  replays a repository fixture for the *proposal* while the state machine, tool
+  executor, policy kernel, approval gate and stores are the real runtime. Every
+  response says which fixture it used (`scriptedBy`), and
+  `POST /api/runtime/agents/svc_03/runs` with `"provider":"openai"` (and a key
+  configured) is a real, paid model call. A provider with no credential is a
+  `503`, never a silent fallback.
+- **The offline approval round trip works end to end:** a disposition that hands
+  the decision to a human pauses the run on a real persisted approval, which the
+  console can approve, after which the gated tool runs.
+
+New npm scripts:
+
+```bash
+npm run test:api       # the HTTP API integration tests only (27 tests)
+```
+
+Everything else is unchanged, and `npm run gate:runtime`
+(`test:unit && test:integration && verify:runtime && eval:runtime`) now includes
+the API tests and the API invariants.
+
+Documentation:
+
+- `docs/GOAL.md` — the goal, the scope, and the acceptance criteria list.
+- `docs/HANDOVER.md` — prerequisites, how to run it, how to run a live model,
+  how to extend a tool/agent/boundary, where data lives, and the known
+  limitations.
+- `docs/VERIFICATION.md` — the acceptance criteria verified one row at a time,
+  with the exact commands and the observed output.
+- `docs/ARCHITECTURE.md` — the architecture audit, the runtime reference, and
+  the "Call 3" section with the final gap list.
 
 ## Evaluate before you deploy
 
@@ -51,7 +125,6 @@ CI runs gates 1 and 2 on every push and pull request. Gate 3 runs on pushes to
 Do not cut a release tag until gate 3 is green on both models.
 
 ## Feeding the prompt to n8n
-
 Do not paste the prompt into the AI Agent node. Fetch it, so the repo stays the
 single source of truth and every change stays audited.
 

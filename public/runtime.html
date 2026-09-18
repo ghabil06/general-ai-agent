@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="description" content="Operator console for the Larptech agent runtime: run records, approvals, tool registry, policy inventory and the last runtime evaluation report.">
+<title>Runtime operator console — Larptech bounded-agency agents</title>
+<link rel="stylesheet" href="/runtime.css">
+</head>
+<body>
+<a class="skip" href="#view">Skip to the console content</a>
+
+<div class="page">
+  <header class="site">
+    <h1>Runtime operator console</h1>
+    <p class="meta">
+      Runs, approvals, tools and policies, read from the live runtime API at <code>/api/runtime</code>.
+      Nothing on this page is precomputed: every view is a read of the runtime's own stores.
+    </p>
+    <nav class="views" id="views" aria-label="Console views">
+      <ul>
+        <li><a href="#/agents" data-view="agents">Agents</a></li>
+        <li><a href="#/runs" data-view="runs">Runs</a></li>
+        <li><a href="#/approvals" data-view="approvals">Approvals</a></li>
+        <li><a href="#/tools" data-view="tools">Tools</a></li>
+        <li><a href="#/policies" data-view="policies">Policies</a></li>
+        <li><a href="#/evaluations" data-view="evaluations">Evaluations</a></li>
+      </ul>
+    </nav>
+    <p class="status-line" id="status" role="status" aria-live="polite">Ready. Choose a view.</p>
+    <p class="actions">
+      <button type="button" id="refresh">Refresh this view</button>
+      <a href="/">Legacy dashboard</a>
+      <a href="/api/runtime/health">Health (raw JSON)</a>
+    </p>
+  </header>
+
+  <main id="view" tabindex="-1">
+    <p class="state empty">Loading the console…</p>
+  </main>
+
+  <footer class="site">
+    <p>
+      Bounded-agency agent runtime. The default provider is the deterministic offline double; a run started
+      against it replays a repository fixture for the proposal, while the state machine, tool executor, policy
+      kernel, approval gate and stores are the real runtime.
+      See <a href="/">the dashboard</a> for the legacy simulation and the prompt/eval gates.
+    </p>
+  </footer>
+</div>
+
+<noscript>
+  <p class="prose">
+    This console reads the runtime API and needs JavaScript. Without it you can still use the API directly:
+    <a href="/api/runtime/health">/api/runtime/health</a>,
+    <a href="/api/runtime/runs">/api/runtime/runs</a>,
+    <a href="/api/runtime/agents">/api/runtime/agents</a>.
+  </p>
+</noscript>
+
+<script src="/runtime.js"></script>
+</body>
+</html>
