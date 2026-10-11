@@ -118,3 +118,79 @@ These are the criteria `docs/VERIFICATION.md` verifies one row at a time.
 | AC-18 | `docs/GOAL.md`, `docs/HANDOVER.md`, `docs/VERIFICATION.md` exist; `docs/ARCHITECTURE.md` carries a "Call 3" section; `README.md` points at the docs, `src/`, the console URL and the new npm scripts. |
 | AC-19 | Every existing test and gate still passes, and the whole offline set passes with no API key. |
 | AC-20 | The offline path is labelled: a response never claims a fixture result is a model result. |
+
+---
+
+# Call 4 — the bounded tool-calling state machine (General AI Agents)
+
+## The request
+
+> **SVC_03 — General AI Agents.** *Algorithm: bounded tool-calling state machine.*
+> Reuse the existing runtime's planning, tool allowlists, execution budgets, policy
+> checks, approval gates, and persisted traces. Use a deterministic state machine for
+> transitions and bounded model-driven planning for flexible tasks. **Do not use:**
+> open-ended agent loops without execution limits.
+
+No file list or acceptance criteria were given, so the criteria below are this call's
+reading of the request. They are what `docs/VERIFICATION.md` §6 verifies.
+
+**A naming collision, resolved by assumption.** In this repository `svc_03` is the
+accounts-payable invoice agent, whose frozen $500.00 boundary must not change. The
+general-purpose agent is `general`. This call builds a bounded execution path for
+general-purpose agents and makes it agent-agnostic (default agent: `general`; any profile,
+`svc_03` included, on request). If "SVC_03" meant something else, only the default agent id
+changes. This is flagged, not confirmed.
+
+## Definition of done
+
+A reviewer can hand a flexible task to `runtime.boundedAgent().execute(task)` and get back a
+persisted result whatever happens: the model's plan is validated against the agent's
+allowlist and capped; every tool call goes through the executor and the policy kernel; a
+gated call pauses the run for a human; and no model, tool, plan, clock or configuration can
+make the run exceed a limit that is written in code. Every pre-existing gate is unchanged
+and the counts only grew.
+
+## Scope
+
+| In scope | Where |
+| --- | --- |
+| The execution envelope: hard ceilings, one resolution point | `src/runtime/envelope.mjs` |
+| The bounded agent: one entry point, one result shape, every run recorded | `src/runtime/bounded-agent.mjs` |
+| Transition fuel on the state machine | `src/runtime/state-machine.mjs` |
+| Runtime hardening found necessary while probing (see ARCHITECTURE §9.5) | `src/runtime/run.mjs`, `src/planning/planner.mjs`, `src/api/handlers/runs.mjs` |
+| Tests, including regression tests written to fail on the old code first | `tests/unit/{envelope,state-machine-fuel,runtime-bounds,planner-proposal-parse}.test.mjs`, `tests/integration/{bounded-agent,api-bounds}.test.mjs`, `tests/helpers/bounded.mjs` |
+| Gate additions | `scripts/verify-runtime.mjs` §13, `npm run test:bounded` |
+| Documentation | `docs/ARCHITECTURE.md` §9, `docs/HANDOVER.md`, `docs/VERIFICATION.md` §6, `README.md` |
+
+### Out of scope (deliberately not done)
+
+- **No new npm dependency; nothing under `evals/`, `prompts/`, `n8n_exports/`,
+  `promptfooconfig*.yaml` or the datasets; no existing test edited.**
+- **No change to a boundary, a policy rule or the approval rules.** Approvals are still not
+  single-use (a pre-existing finding, reported in ARCHITECTURE §9.8).
+- **No HTTP endpoint for `execute()` and no console view.** It is a library entry point; the
+  existing run endpoint gets the runtime hardening and a ceiling check, nothing else.
+- **No route-table entry for `general_assistance`** (an existing test pins the table; which
+  model serves general tasks is a product decision).
+- **No live-model run.** No key in this environment; every adversarial provider is a test double.
+- **No runtime version bump** (an existing test pins `0.2.0`).
+
+## Acceptance criteria
+
+| # | Criterion |
+| --- | --- |
+| AC-B1 | `execute(task)` is the single entry point. It returns a result for every outcome and throws only `BoundedAgentError`, only for a request refused **before a run exists**, creating nothing (no run, event or audit row). |
+| AC-B2 | The model proposes; code disposes. Every tool call goes through the executor; every executed tool has an earlier `ALLOW` verdict from the policy kernel in the same run. |
+| AC-B3 | Strategy (`auto` / `planned` / `direct`) is a deterministic function of the request and the profile. A caller-supplied plan executes deterministically; a model-proposed plan is bounded model-driven planning. |
+| AC-B4 | A plan naming a tool outside the agent's allowlist is refused before any tool is asked to run; plan size and replans are capped. |
+| AC-B5 | No environment variable, profile, request or API call can raise any limit past a hard ceiling. A request may only tighten, and the envelope reports what bound each limit. |
+| AC-B6 | Every wait is bounded: a model that never answers and a tool that outlasts the run are cut off by the run's remaining wall-clock; the provider's request is aborted. |
+| AC-B7 | The state machine has its own bound: after N transitions only a terminal move remains; a terminal move is reachable from every non-terminal state; spent fuel stops the run as `TRANSITION_LIMIT`, recorded. |
+| AC-B8 | A model that asks for a fresh tool call forever, or returns thousands of invalid calls in one completion, is stopped by the budgets, inside the envelope. |
+| AC-B9 | Cancelling at any await point resolves the loop (never rejects), records the run `CANCELLED`, abandons a model call in flight promptly, and runs no further tool. |
+| AC-B10 | Every run that is created is recorded — run row, trace, audit row — on every exit, including a fault. A gated call pauses the run non-terminal; a granted approval resumes it; it is bound to the call's arguments. |
+| AC-B11 | The SVC_03 boundary is unchanged through the new path: $500.00 allowed, $500.01 denied, no structured facts means denied. |
+| AC-B12 | Mock vs real is labelled: a test-double result says so; an unconfigured provider is refused, never silently replaced. |
+| AC-B13 | Every pre-existing test and gate is unchanged in expectation: no existing test edited, the evaluation numbers identical, the counts only grew. |
+| AC-B14 | `docs/ARCHITECTURE.md` §9, `docs/HANDOVER.md`, `docs/VERIFICATION.md` §6, `docs/GOAL.md` and `README.md` describe it, including what is not verified and what was found wrong. |
+

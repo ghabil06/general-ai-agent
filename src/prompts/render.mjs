@@ -24,7 +24,9 @@
  *      -> `PLACEHOLDER_VALUE_INVALID` (not convertible to a non-empty string)
  *   3. no `{{...}}` may survive the substitution
  *      -> `PLACEHOLDER_UNRESOLVED`
- *   4. a template path may not escape the prompts directory
+ *   4. a template path may not escape the prompts directory; a Windows-rooted path
+ *      (`C:/x`, `C:\x`, `\\server\share`, `\x`) counts as an escape on EVERY host,
+ *      not only on Windows
  *      -> `PROMPT_PATH_ESCAPE`
  *
  * The four prompt files are read, never written. `prompts/` is a source of
@@ -205,6 +207,18 @@ export function createPromptRenderer({ promptsDir = path.join(REPO_ROOT, 'prompt
       throw new PromptRenderError(PROMPT_ERROR_CODES.NOT_FOUND, `invalid template path ${JSON.stringify(templatePath)}`, {
         templatePath,
       });
+    }
+    // `C:/x`, `C:\x`, `\\server\share` and `\x` are absolute on Windows, but on a POSIX host `path.isAbsolute` calls
+    // them relative, so they would resolve to a (missing) file INSIDE promptsDir and be reported as NOT_FOUND instead
+    // of an escape. They are never a valid template name on any host, so refuse them everywhere and keep the verdict
+    // independent of the OS. On Windows `path.isAbsolute` already is `path.win32.isAbsolute`: nothing changes there.
+    if (!path.isAbsolute(templatePath) && path.win32.isAbsolute(templatePath)) {
+      throw new PromptRenderError(
+        PROMPT_ERROR_CODES.PATH_ESCAPE,
+        `template "${templatePath}" is a Windows-rooted path (drive, UNC or backslash-rooted); template paths are ` +
+          'relative to the prompts directory, so a caller cannot render arbitrary files as a system prompt',
+        { templatePath },
+      );
     }
     const absolute = path.isAbsolute(templatePath) ? templatePath : path.resolve(promptsDir, templatePath);
     const within = path.relative(promptsDir, absolute);

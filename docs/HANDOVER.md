@@ -185,6 +185,58 @@ const response = await api.handle({
 // -> { status, headers, body: '<json>' }   (or null for a non-runtime path)
 ```
 
+### Running a bounded task (no server) — the General AI Agents entry point
+
+`runtime.boundedAgent().execute(task)` runs one tool-calling task as a **bounded state
+machine** and always returns a persisted result. The model proposes (a plan, a tool call,
+an answer); the guarded state machine, the executor (schema → policy → approval gate →
+budget → timeout), the budgets and the deadlines decide everything else. Design and
+guarantees: `docs/ARCHITECTURE.md` §9.
+
+```js
+import { createRuntime } from './src/index.mjs';
+
+// Offline, the provider is a deterministic TEST DOUBLE that replays a script.
+const runtime = createRuntime({
+  mockScript: [
+    { text: JSON.stringify({ steps: [
+        { id: 's1', description: 'Get the AAPL quote', tool: 'get_market_quote', args: { ticker: 'AAPL' } },
+        { id: 's2', description: 'Get the portfolio',  tool: 'get_portfolio_state', args: {} },
+    ] }) },                                            // the model's plan
+    { text: 'AAPL quote and portfolio, summarised.' }, // the model's summary
+  ],
+});
+
+const result = await runtime.boundedAgent().execute({
+  goal: 'Report the AAPL quote and the paper portfolio state.',
+  limits: { maxIterations: 6, wallClockMs: 30_000 },   // may only tighten
+});
+// result.ok, result.status, result.answer, result.stopReason, result.executedTools,
+// result.usage, result.envelope (what bound each limit), result.provider.mock, result.record
+```
+
+- **`strategy`** — `auto` (default), `planned` or `direct`. Pass `steps` to supply the plan
+  yourself: execution of it is then fully deterministic and the model is only asked to summarise.
+- **It throws only `BoundedAgentError`**: for a request refused before any run exists (unknown
+  limit, above a hard ceiling, empty goal, an unconfigured provider, an agent whose prompt of
+  record cannot be rendered, …), when nothing is persisted; or `PERSISTENCE_FAILED` when the
+  run finished but the store could not be written. A budget stop, a policy denial, a cancel, a
+  deadline or an internal fault is a *result* with a status and a stop reason, recorded like
+  any other run.
+- **Approval gates:** a gated step returns `paused: true` and a `pendingApprovalId`. Approve it
+  (`runtime.approvals.approve(id, { resolvedBy })` or the API), then call `execute` again with
+  the same task and `approvalId`. An approval is bound to the tool and its arguments.
+- **Cancel** by passing an `AbortSignal`; aborting records the run `CANCELLED` and abandons a
+  model call in flight.
+- **Another agent:** `execute({ agentId: 'svc_03', goal: <invoice text>, evidence: {...} })`.
+  A domain agent takes the goal as its payload and answers with a decision object; the kernel
+  still rules on it (`result.policyDecision`). `evidence` must come from *your* system of
+  record — never from the model or the text being processed.
+- **Live provider:** `execute({ provider: 'openai' })` — and never a silent mock: an
+  unconfigured provider is refused. Unverified here (no key).
+- Do not run two `execute()` calls concurrently against the **mock** provider (it is one shared
+  double). The HTTP API serialises its runs for the same reason.
+
 ---
 
 ## 5. Running a real live model
@@ -346,10 +398,11 @@ their fixtures from there.
 
 | Command | What it proves | Notes |
 | --- | --- | --- |
-| `npm test` | 333 unit tests | no network, no key |
-| `npm run test:integration` | 81 integration tests (54 runtime + 27 API) | starts the real server on an ephemeral port for the API half |
+| `npm test` | 398 unit tests (388 before batch B1, 333 before call 4) | no network, no key. All pass on POSIX. The one failure call 4 recorded (`prompts-render` "a path outside prompts/ is refused", a Windows path on a POSIX host) was fixed in batch B1 — see `docs/ARCHITECTURE.md` §9.8 |
+| `npm run test:integration` | 114 integration tests (54 runtime + 27 API + 30 bounded agent + 3 API bounds) | starts the real server on an ephemeral port for the API half |
 | `npm run test:api` | the 27 API tests alone | fastest feedback while working on `src/api/` |
-| `npm run verify:runtime` | 84 invariant checks, including 20 API checks | writes evidence under a temp directory, not into the repo |
+| `npm run test:bounded` | the 88 bounded-execution tests: envelope, transition fuel, the runtime regressions, plan parsing, the bounded agent end to end, the API ceilings | no network, no key; the adversarial providers are test doubles |
+| `npm run verify:runtime` | 103 invariant checks, including 20 API checks and 19 bounded-execution checks | writes evidence under a temp directory, not into the repo |
 | `npm run eval:runtime` | the three datasets through the real runtime, offline | writes `data/state/evals/runtime-results.json` |
 | `npm run eval:runtime:oracle` | oracle only | |
 | `node evals/validate_dataset.mjs` (and `validate_security_dataset.mjs`, `validate_trading_dataset.mjs`) | dataset/prompt/config consistency | no key, no spend |
@@ -388,6 +441,9 @@ node evals/validate_dataset.mjs && node evals/validate_security_dataset.mjs && n
 Then start the server and walk §4 and §6 of `docs/VERIFICATION.md`, which list
 the exact calls, the status codes and the responses observed.
 
+For the bounded tool-calling state machine (call 4): `npm run test:bounded`, and
+`npm run verify:runtime` (its §13 block). `docs/VERIFICATION.md` §6 has the numbers.
+
 To see the console's structure without a browser:
 
 ```bash
@@ -422,6 +478,11 @@ Stated plainly. Each one is a real limit, not a caveat about style.
    iteration. A model call or tool call already dispatched finishes — a plain JS
    function cannot be cancelled. Cancelling a *paused* run is a state change on
    a persisted row, because nothing is executing.
+   *(Call 4 refined this: a MODEL call in flight is now abandoned immediately on
+   cancel or when the run's wall-clock runs out, and the provider's request is
+   aborted; a TOOL call in flight still finishes, is recorded, and nothing after
+   it runs. Cancelling a live run through the API now records it `CANCELLED`
+   instead of failing the start request. `docs/ARCHITECTURE.md` §9.5.)*
 6. **A resumed escalation produces a second pending approval.** Approving a
    gated `request_human_approval` call lets the tool run, and that tool records
    its own queue entry. So after a resume the queue can hold a new pending
@@ -451,3 +512,27 @@ Stated plainly. Each one is a real limit, not a caveat about style.
 14. **The console's writes are not optimistic.** Every action re-reads the view
     from the API, which is slower than patching the DOM but means the console
     never shows a state the server did not confirm.
+15. **Prompt template-path containment is lexical, and no CI job runs its tests.**
+    `src/prompts/render.mjs` refuses a template path that leaves `prompts/` by path
+    arithmetic (`path.resolve` + `path.relative`); since batch B1 that includes
+    Windows-rooted paths on every host (`docs/ARCHITECTURE.md` §7.4). It does not
+    resolve symlinks, and `.github/workflows/prompt-eval.yml` runs the dataset
+    validators, the n8n checks and the promptfoo gates — never `npm test` or the
+    runtime suites. Only in-process code can hand the renderer a free template path
+    (`runtime.renderPrompt()`, or the exposed `runtime.promptRenderer` methods); no HTTP
+    handler passes a caller-supplied path to it. The Windows behaviour of these paths has
+    **never been run on a Windows host** (B1 checked it only by emulating `path.win32`).
+    Deferred, none started:
+    - symlink / `realpath` containment for `prompts/`;
+    - a CI job that runs `npm test`, ideally on both ubuntu and windows;
+    - a template-path check in `verify:runtime` (its two prompt checks cover a good render
+      and an empty placeholder only, nothing about escapes);
+    - a segment-aware `..` test: `startsWith('..')` also refuses a real file named
+      `..hidden.md` that sits inside `prompts/` — stricter than "may not escape", and
+      fail-closed (relaxing it needs its own review);
+    - backslash normalisation and drive-relative forms such as `D:x`;
+    - a BigInt, circular or throwing-`toJSON` template path makes the invalid-input branch
+      raise a raw `TypeError`/`RangeError` instead of a `PromptRenderError` (the reader
+      still never runs);
+    - `prompts-render.test.mjs` "any values are substituted…" resolves `prompts/` from the
+      working directory, so it fails with `ENOENT` unless run from the repo root.

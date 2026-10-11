@@ -157,6 +157,11 @@ export const TRANSITION_REJECTION = Object.freeze({
   TERMINAL_STATE: 'TERMINAL_STATE',
   GUARD_FAILED: 'GUARD_FAILED',
   SELF_TRANSITION: 'SELF_TRANSITION',
+  /**
+   * The machine has used its transition fuel (see `createStateMachine`). Only a
+   * move into a terminal state is still allowed, so a run can always be closed.
+   */
+  TRANSITION_LIMIT: 'TRANSITION_LIMIT',
 });
 
 /** @returns {boolean} */
@@ -226,9 +231,27 @@ export function canTransition(from, to, meta = {}) {
  * @param {Function} [options.now]
  * @param {string}   [options.runId]
  * @param {Function} [options.onTransition] receives `{ from, to, at, seq, meta }`
+ * @param {number|null} [options.maxTransitions] TRANSITION FUEL. The table says which
+ *   moves are legal; it says nothing about how many a run may take, and the table has
+ *   cycles (EXECUTING → … → VALIDATING → EXECUTING). With a number here the machine
+ *   refuses every non-terminal move once `seq >= maxTransitions` and allows only a move
+ *   into a terminal state, so any sequence of calls is finite: at most
+ *   `maxTransitions` moves plus the one that ends the run. A terminal move is always
+ *   reachable — `FAILED` is a legal target from every non-terminal state, and a unit
+ *   test pins that — so exhausting the fuel can never strand a run mid-flight.
+ *   `null` (the default) is the original, unbounded behaviour.
  */
-export function createStateMachine({ initial = STATES.IDLE, now = () => Date.now(), runId = null, onTransition } = {}) {
+export function createStateMachine({
+  initial = STATES.IDLE,
+  now = () => Date.now(),
+  runId = null,
+  onTransition,
+  maxTransitions = null,
+} = {}) {
   if (!isKnownState(initial)) throw new StateTransitionError(TRANSITION_REJECTION.UNKNOWN_STATE, '<init>', initial);
+  if (maxTransitions !== null && (!Number.isInteger(maxTransitions) || maxTransitions < 0)) {
+    throw new TypeError(`createStateMachine: maxTransitions must be null or a non-negative integer, got ${JSON.stringify(maxTransitions)}`);
+  }
 
   let state = initial;
   let seq = 0;
@@ -236,9 +259,20 @@ export function createStateMachine({ initial = STATES.IDLE, now = () => Date.now
   const listeners = new Set();
   if (typeof onTransition === 'function') listeners.add(onTransition);
 
+  /** True when the fuel is spent and `to` is not a way out. */
+  const fuelBlocks = (to) => maxTransitions !== null && seq >= maxTransitions && !isTerminalState(to);
+
   function transition(to, meta = {}) {
     const refusal = transitionGuardReason(state, to, meta);
     if (refusal) throw new StateTransitionError(refusal.code, state, to, refusal.detail);
+    if (fuelBlocks(to)) {
+      throw new StateTransitionError(
+        TRANSITION_REJECTION.TRANSITION_LIMIT,
+        state,
+        to,
+        `the transition fuel (${maxTransitions}) is spent; only a terminal move remains`,
+      );
+    }
 
     const from = state;
     state = to;
@@ -266,7 +300,16 @@ export function createStateMachine({ initial = STATES.IDLE, now = () => Date.now
     history,
     runId,
     transition,
-    can: (to, meta = {}) => canTransition(state, to, meta),
+    can: (to, meta = {}) => canTransition(state, to, meta) && !fuelBlocks(to),
+    /** `{ limit, used, remaining, exhausted }`; `limit`/`remaining` are null when unbounded. */
+    get fuel() {
+      return Object.freeze({
+        limit: maxTransitions,
+        used: seq,
+        remaining: maxTransitions === null ? null : Math.max(0, maxTransitions - seq),
+        exhausted: maxTransitions !== null && seq >= maxTransitions,
+      });
+    },
     is: (candidate) => state === candidate,
     isTerminal: () => isTerminalState(state),
     allowed: () => allowedTransitions(state),

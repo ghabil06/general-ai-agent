@@ -465,7 +465,239 @@ AGENT_STORAGE_DIR=/tmp/agent-verify PORT=4317 node server.mjs   # leave running
 # then run the curl calls above; kill the process and restart it for §3.8
 ```
 
-Expected totals: unit **333/333**, integration **81/81**, API **27/27**,
-verify **84/84**, eval:runtime **gates passed** (oracle 12/12 per SVC agent,
-naive 3/5/3), validators **3× OK**, promptfoo oracle **12/12** and naive
-**9 failures**.
+Expected totals **at the end of call 3**: unit **333/333**, integration **81/81**,
+API **27/27**, verify **84/84**, eval:runtime **gates passed** (oracle 12/12 per SVC
+agent, naive 3/5/3), validators **3× OK**, promptfoo oracle **12/12** and naive
+**9 failures**. *Call 4 added tests and checks to these gates; the current totals are in §6.2.*
+
+---
+
+## 6. Call 4 addendum — the bounded tool-calling state machine (General AI Agents)
+
+Verification of `docs/GOAL.md` AC-B1…AC-B14. As in the rest of this report, the
+numbers below were produced by running the commands in this environment; where
+something was not run, §6.5 says so and why.
+
+### 6.1 Environment
+
+Linux sandbox, Node **v22.22.3**, npm **10.9.8**, 2026-10-11. No `OPENAI_API_KEY` or
+`ANTHROPIC_API_KEY` at any point, so **no run in this section made a network call to a
+model**. `node_modules` is not installed and `npm ci` was not run: the unit,
+integration, verify and eval gates need no dependency. The three dataset validators need
+`js-yaml`; it was installed into `/tmp` alone and supplied through `NODE_PATH`, so the
+repository was not touched.
+
+### 6.2 Gate results — before (`edaebc6`) and after
+
+| Gate | Before | After |
+| --- | --- | --- |
+| `npm test` | 333 tests, 332 pass, **1 fail** (pre-existing, below) | **388** tests, 387 pass, **1 fail** (the same one; fixed later in batch B1, §7) |
+| `npm run test:integration` | 82 tests, 81 pass, 1 skip ¹ | **114** tests, 114 pass, 0 skip |
+| `npm run test:api` | 27 | 27 (unchanged) |
+| `npm run test:bounded` | — | **88** pass |
+| `npm run verify:runtime` | 84 checks | **103** checks |
+| `npm run eval:runtime` | gates passed; oracle 12/12 ×3, naive 3/12 · 5/12 · 3/12, general 2/2 | **identical** |
+| `evals/validate_{dataset,security_dataset,trading_dataset}.mjs` | not run (needs `js-yaml`) | OK ×3 (exit 0) |
+| `n8n_exports` lint / parse test / replay dry-run | not run | exit 0 ×3 |
+| promptfoo offline gates (`npm run gate`) | not run | **not run** — see §6.5 |
+
+¹ The baseline "skip" was a `test.skip()` called *inside* `api.test.mjs`, which creates a
+nested skipped subtest that counts as a test; it is created only when no eval report is on
+disk. After `eval:runtime` ran the report existed and the subtest was not created. The four
+pre-existing integration files still sum to the same 81 tests, and 33 are new.
+
+**The pre-existing failure** is `tests/unit/prompts-render.test.mjs` "a path outside prompts/
+is refused": it feeds the Windows path `C:/Windows/System32/drivers/etc/hosts`, expecting
+`PROMPT_PATH_ESCAPE`; on POSIX that string is not absolute, so it resolves *inside*
+`prompts/` and yields `PROMPT_NOT_FOUND`. That input resolved to a (missing) file inside
+`prompts/`, so nothing outside it was read — but the verdict depended on the host OS. It
+failed identically before any change in call 4 and was left alone then. **Batch B1 fixed
+it (§7)** by making `resolveTemplate()` refuse Windows-rooted paths on every host; the
+test itself was not edited.
+
+**No existing test was edited:** `git diff edaebc6 --name-status -- tests` shows only
+**added** files (`tests/helpers/bounded.mjs`, four unit files, two integration files).
+Nothing under `evals/`, `prompts/`, `n8n_exports/`, `data/` or `promptfooconfig*.yaml`
+changed.
+
+### 6.3 Acceptance criteria
+
+Test names are those in the files named; `verify` rows are lines printed by
+`npm run verify:runtime` (§13 of the script).
+
+| # | Evidence | Result |
+| --- | --- | --- |
+| AC-B1 | `bounded-agent.test.mjs`: *an invalid request throws a typed error and creates NOTHING* — 19 refused requests, `runs`/`events`/`audit` row counts identical before and after; *execute() throws ONLY BoundedAgentError* (a Symbol agent id, a hostile getter, an unrenderable prompt of record → typed, `0` runs, `0` events); *PERSISTENCE_FAILED* names the run. verify: "…each refused with a typed error, and create no run" | PASS |
+| AC-B2 | *execution … is gated by the executor: every executed tool was ALLOWed first* (event-order check on the persisted stream); verify: "every executed tool had an earlier ALLOW verdict from the policy kernel in the same run" | PASS |
+| AC-B3 | *planned (auto)* strategy reason "flexible task"; *planned with caller-supplied steps is deterministic* (**1** model call, no plan call); *direct*; *auto chooses direct for an agent that holds no tools*; *the same task against the same script follows the same path* (identical `stateHistory`, tools, usage, envelope); *deterministic replans* (**1** model call with a failed step) | PASS |
+| AC-B4 | *a plan that names a tool outside the allowlist is refused before anything runs* (`PLAN_TOOL_NOT_PERMITTED`, `toolCalls: []`); *a plan step cap and a replan cap* (`maxReplans: 2` → exactly 2 replanning model calls, plan of 3 steps); `planner-proposal-parse`: *leniency in PARSING does not widen what the agent may do*. verify: "a plan naming a tool outside the allowlist is refused before any tool is asked to run" | PASS |
+| AC-B5 | `envelope.test.mjs` (13): precedence, a default is not a ceiling, `Infinity`/`NaN`, ceilings above every default and shipped profile; `runtime-bounds`: *configuration cannot raise a run past the hard ceilings* (`AGENT_MAX_ITERATIONS=1000000000`), *planner ceilings are clamped*; `bounded-agent`: *a request cannot raise a limit past the profile … nor past a hard ceiling*; `api-bounds`: planner ceiling above its ceiling → **400** (it was 201). | PASS |
+| AC-B6 | `runtime-bounds`: *a model call that outlives the remaining wall-clock is cut off* (budget 150 ms, call 1 500 ms), *a provider that never resolves cannot hang the run, and its request is aborted* (`signal.aborted === true`), *a tool call is never given longer than the remaining wall-clock*. verify: "a provider that never answers cannot hang a run: stopped by the wall-clock deadline in **152ms** (budget 150ms)" | PASS |
+| AC-B7 | `state-machine-fuel.test.mjs` (8): `FAILED` and `CANCELLED` reachable from every non-terminal state; **500 seeded adversarial walks** over the table, longest = fuel + 1 exactly; the same walk without fuel does not end; `runtime-bounds`/`bounded-agent`: `TRANSITION_LIMIT`, persisted; `envelope.test`: the fuel formula checked against the real loops (worst measured **4.3** transitions per iteration, ≥ 46 of 80 to spare). verify: "spent transition fuel stops the run (TRANSITION_LIMIT), never mid-air" | PASS |
+| AC-B8 | *a model that asks for a fresh tool call forever (direct)*: the model was called **exactly 8** times (= `maxIterations`); *a completion carrying thousands of schema-invalid tool calls* → **13** recorded attempts (it was 10 000). verify: "8 calls = maxIterations 8", "cut off at 13 recorded attempts (maxToolCalls 12)" | PASS |
+| AC-B9 | `runtime-bounds`: cancel during a model call, a tool-calling turn, an in-flight **tool** call (the call is recorded, the next call in the turn never starts), before the loop starts, and at **each of the five** planned-loop await sites (plan proposal, tool step, free-form step, synthesis, replan) — every one resolves `CANCELLATION_REQUESTED`, ends `CANCELLED`, is closable and persisted; `api-bounds`: **`POST /runs/:id/cancel` on a live run** → `201`, `CANCELLED`, persisted (it used to throw and vanish). verify: "(42ms of a 1500ms call)" | PASS |
+| AC-B10 | `assertRecorded()` on the happy, blocked, budget, deadline, abort, fuel and fault paths (run row + trace + `run.started` + audit row, read back from disk); approval: *PAUSES the run, persisted and non-terminal; a granted approval resumes it; a different call does not*; *a rejected approval does not resume anything*; *a restarted runtime still reads the run*. verify: "a gated call pauses the bounded run: persisted, non-terminal, nothing executed" | PASS |
+| AC-B11 | *the SVC_03 $500.00 boundary still decides, through the bounded agent*: dataset case `boundary_exact` ($500.00, verified PO, variance 0) → `ALLOW`; `boundary_over` ($500.01) → `DENY` by `svc_03.invoice_boundary`, reason names 500; **no structured facts → `DENY`** | PASS |
+| AC-B12 | every mock result carries `provider.mock === true` and a `notice`; *a provider that is not configured is refused, never silently replaced by the mock* (message: "will not substitute a mock"). verify: "the result says the provider was a test double" | PASS |
+| AC-B13 | §6.2: counts only grew; `eval:runtime` identical; no existing test edited; nothing under `evals/`, `prompts/`, `n8n_exports/` changed | PASS |
+| AC-B14 | `docs/ARCHITECTURE.md` §9, `docs/HANDOVER.md`, `docs/GOAL.md`, this section, `README.md` | PASS |
+
+### 6.4 The defects, before and after
+
+Each probe below was run against `edaebc6` **before any change**, then re-run (same script)
+after the fix. The regression tests that replaced the probes were written first and were
+run against the unfixed runtime: **19 of the first 23 failed**, and failed for the reasons
+below (e.g. `'maxIterations=1: 2 iterations were recorded'`).
+
+| Probe | Before (`edaebc6`) | After |
+| --- | --- | --- |
+| planned loop, always-failing step + replans | `maxIterations` 1/3/5 → **2/4/6** iterations recorded | **1/3/5**; 0 model calls at 1 |
+| cancel during an in-flight model call | `loop` **rejected**: `StateTransitionError: CANCELLED -> OBSERVING`; no run row, no trace | `loop` resolves `CANCELLATION_REQUESTED`, state `CANCELLED` |
+| 1 500 ms model call, 200 ms wall-clock, real clock | returned after **1 506 ms**, completed normally | returned after **199 ms**, `WALL_CLOCK_TIMEOUT` |
+| a provider that never resolves, 200 ms wall-clock | **still hung after 3 000 ms** | `loop` returned, `WALL_CLOCK_TIMEOUT` |
+| free-form plan step, two tool calls | `MODEL_ERROR: OBSERVING -> OBSERVING`, FAILED, after both tools ran | COMPLETED, both tools |
+| plan wrapped in a fence / a sentence (5 shapes) | 3 of 5 **not parsed** | 5 of 5 |
+| `maxToolCalls = N`, runaway model | executed **N − 1** (N=1 → 0) | executed **N** |
+| one completion of 5 000 invalid tool calls | **10 000** attempts, budget 0, 1 346 ms | **13** attempts, 51 ms |
+| API `planning.maxSteps = 1 000 000 000` | HTTP **201** | HTTP **400** |
+| planner `maxSteps: NaN`, 40-step plan | accepted | (via `createAgentRun`) refused: `EnvelopeError INVALID_LIMIT` |
+
+### 6.5 What was not verified
+
+1. **No live model.** Nothing here shows how any real model behaves. The adversarial
+   providers (runaway, never-answers, corrupt, flood) are test doubles; they show the
+   *runtime* stops. The tolerant plan parsing is verified against fixed strings, not real
+   model output.
+2. **The promptfoo offline gates were not run** (`npm run gate`, `eval:offline*`): they need
+   `npm ci` and the `promptfoo` package. They are structurally independent of this change
+   (nothing under `evals/`, `prompts/`, `n8n_exports/` or the configs imports `src/`, and
+   none of those paths changed), but "independent by inspection" is not "ran green".
+3. **The operator console was not opened in a browser** (unchanged from call 3; no browser
+   here). `public/runtime.js` renders `stopReason.code` generically, so the new codes
+   (`TRANSITION_LIMIT`, `INTERNAL_ERROR`, `INPUT_REJECTED`) need no console change — checked by
+   reading, not by rendering.
+4. **No concurrency stress on the runtime itself.** The new timing-sensitive files (59 tests)
+   were run 8× sequentially earlier, and on the final tree 6× in parallel under CPU
+   contention and once under `--unhandled-rejections=strict` (so an abandoned provider promise
+   that rejected late would fail the run) — all green. That is evidence against flakiness,
+   not proof.
+5. **Pre-existing, found and reported, not changed:** a granted approval is bound to the tool
+   and arguments but is **not single-use** (replaying it re-executes the call until it
+   expires); `maxStepAttempts` is inert; `general_assistance` has no route-table entry.
+   `docs/ARCHITECTURE.md` §9.8.
+
+### 6.6 Reproducing this section
+
+```bash
+npm test && npm run test:integration && npm run test:bounded
+npm run verify:runtime && npm run eval:runtime
+
+# the dataset validators, with js-yaml supplied from /tmp (the repo stays untouched)
+mkdir -p /tmp/yamldeps && (cd /tmp/yamldeps && npm install js-yaml --silent)
+NODE_PATH=/tmp/yamldeps/node_modules node evals/validate_dataset.mjs
+NODE_PATH=/tmp/yamldeps/node_modules node evals/validate_security_dataset.mjs
+NODE_PATH=/tmp/yamldeps/node_modules node evals/validate_trading_dataset.mjs
+```
+
+Expected totals after batch B1 (call 4 ended at unit **388** with the one POSIX failure that
+B1 fixed): unit **398**, integration **114**, API **27**, bounded **88**, verify **103**,
+eval:runtime **gates passed** (oracle 12/12 per SVC agent, naive 3/5/3, general 2/2),
+validators **3× OK**.
+
+## 7. Batch B1 addendum — Windows-rooted prompt template paths
+
+Scope: one behaviour. A Windows-rooted template path (`C:/x`, `C:\x`, `\\server\share`,
+`\x`) is refused with `PROMPT_PATH_ESCAPE` on **every** host. As in §6, every number below
+was produced by running the command in this environment: Linux, Node **v22.22.3**,
+2026-10-11, no model call, no dependency installed.
+
+### 7.1 What changed
+
+- `src/prompts/render.mjs` — a guard in `resolveTemplate()`:
+  `!path.isAbsolute(p) && path.win32.isAbsolute(p)` → `PROMPT_PATH_ESCAPE`, before the path
+  is resolved or any file is read (+15/−1 lines; 7 of the added lines and the one removed
+  line are comments). The containment check, `PROMPT_ERROR_CODES` and every other behaviour are unchanged. By Node's design
+  `path.isAbsolute` already is `path.win32.isAbsolute` on Windows, so the guard cannot
+  fire there.
+- `tests/unit/prompts-path-containment.test.mjs` — new, 10 tests (below).
+- `README.md`, `docs/ARCHITECTURE.md` §7.4 / §9.8, `docs/HANDOVER.md` §8 / §10, this section.
+- `tests/unit/prompts-render.test.mjs` is **byte-identical** (blob `8eafb17…`, the same as on
+  `edaebc6` and `main`).
+
+### 7.2 The new tests fail without the fix and pass with it
+
+Against the original `render.mjs`: **5 of 10 fail**, each for the right reason — a
+Windows-rooted input gives `PROMPT_NOT_FOUND`, and the file reader **ran** for
+`C:/Windows/…`. They are: drive-rooted, UNC / backslash-rooted, every public entry point,
+the `runtime.renderPrompt()` facade, and "the reader runs for allowed paths only". The other 5
+(POSIX-absolute outside, relative traversal, sibling-prefix, valid inside incl. absolute-inside,
+invalid types and empty paths) pass both before and after: they pin containment that already
+held, so a wrong fix cannot weaken it unnoticed. With the guard: **10 / 10**; run from `/`,
+`/tmp` and the repo root, 3× each, all green, no temp directory left behind.
+
+Mutations, each applied to a scratch copy of the final tree and run against the new file plus
+`prompts-render.test.mjs` (23 tests):
+
+| Mutation | Result | Caught by |
+| --- | --- | --- |
+| M1 guard refuses *every* absolute path | 2 fail | new tests only (valid-inside, reader proof) |
+| M2 containment check switched off | 8 fail | 7 new + the existing escape test |
+| M3 containment by string prefix (`startsWith(promptsDir)`) | 5 fail | new tests only — the existing file does not catch it |
+| M4 guard reports `PROMPT_NOT_FOUND` | 5 fail | 4 new + the existing escape test |
+| M5 guard throws a plain `Error` | 6 fail | 5 new + the existing escape test |
+| M6 guard removed (= the original) | 6 fail | 5 new + the existing escape test |
+| M7 the same guard spelled as a POSIX-only check | 0 fail | control: the tests are not tied to one spelling |
+
+### 7.3 Gate results
+
+| Gate | Before (pristine export of `2117f3d`) | After |
+| --- | --- | --- |
+| `node --test tests/unit/prompts-render.test.mjs` | exit 1 — 13 tests, 12 pass, **1 fail** | exit 0 — 13 / 13 |
+| `node --test tests/unit/prompts-path-containment.test.mjs` | — (new) | exit 0 — **10** / 10 |
+| `npm test` | exit 1 — 388 tests, 387 pass, **1 fail** | exit 0 — **398** tests, 398 pass, 0 fail, 0 skip |
+| `npm run test:integration` | 115 tests, 114 pass, 1 skip ¹ | 114 / 114, 0 skip (report on disk); 115 / 114 / 1 skip in a pristine layout ¹ |
+| `npm run test:api` | 28 tests, 27 pass, 1 skip ¹ | 27 / 27 (report on disk); 28 / 27 / 1 skip in a pristine layout ¹ |
+| `npm run test:bounded` | 88 pass | 88 pass |
+| `npm run verify:runtime` | 103 checks | 103 checks |
+| `npm run eval:runtime` | gates passed | gates passed; report unchanged (§7.4) |
+
+¹ The nested skip is the one explained under §6.2: it exists only while no eval report is on
+disk. "Pristine layout" is the final tree exported without the ignored `data/state/evals/`,
+which reproduces the *before* numbers exactly, so the integration and API suites are
+unchanged by this batch.
+
+### 7.4 The eval report is unchanged
+
+Four reports were compared field by field: before and after, each in a pristine export and in
+the repository. Dropped before comparing: `generatedAt`, `startedAt`, `finishedAt`,
+`durationMs`, `maxLatencyMs`, `latencyMs`, `storageDir`, `datasetPath` and `planId`. Rewritten
+inside 228 strings: temp and home paths, `pln_…` ids and `NNms` text. Everything else — 5943
+values (158 null, 3655 boolean, 2130 number) and every string — is **identical in all four**,
+and a planted edit to one case verdict and one gate count was detected, so the comparison is
+not vacuous. Oracle 12/12 ×3 and 2/2; naive 3/12 · 5/12 · 3/12. The evaluation never passes a
+template path, so "no change" was the expectation, not a finding.
+
+### 7.5 What was not verified
+
+1. **No Windows host.** 40 inputs from the new tests' lists were also run through the module's
+   real text with `path.win32` swapped in (scratch, in-memory files): every one gave the
+   verdict the tests expect. That is an emulation of the path logic, **not a Windows test
+   run**; the new tests have never been run on Windows.
+2. **The dataset validators and the promptfoo gates were not run.** They need `npm ci`
+   (`js-yaml`, `promptfoo`) and nothing was installed. Nothing under `evals/`, `prompts/`,
+   `n8n_exports/` or the configs changed.
+3. **Not covered by the tests, on purpose:** symlinks, percent-encoded names, backslash
+   traversal (`..\x` is an ordinary file name on POSIX, so its verdict is host-dependent and
+   is not asserted), and non-string inputs whose message cannot be serialised. The follow-ups
+   are listed in `docs/HANDOVER.md` §10 item 15.
+
+### 7.6 Reproducing this section
+
+```bash
+node --test tests/unit/prompts-render.test.mjs tests/unit/prompts-path-containment.test.mjs  # 23 tests
+npm test && npm run test:integration && npm run test:api && npm run test:bounded
+npm run verify:runtime && npm run eval:runtime
+```
+
+To watch the new tests fail, change the guard's condition to `false` in a scratch copy: 5 of
+the 10 fail (M6 above).

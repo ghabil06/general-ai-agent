@@ -29,6 +29,7 @@
 
 import { API_ERROR_CODES, apiError } from '../errors.mjs';
 import { PROVIDER_IDS } from '../../config/index.mjs';
+import { HARD_CEILINGS } from '../../runtime/envelope.mjs';
 import { STATES } from '../../runtime/state-machine.mjs';
 import { parseDecision, terminalStatusFor } from '../../agents/index.mjs';
 import { buildOfflinePlan, validateScriptAgainstSchemas } from '../offline.mjs';
@@ -164,6 +165,16 @@ export function createRunsHandler({ runtime, now = () => Date.now() }) {
       if (planning[key] !== undefined && planning[key] !== null) {
         if (!Number.isInteger(planning[key]) || planning[key] < 1) {
           throw apiError(API_ERROR_CODES.INVALID_REQUEST, `\`planning.${key}\` must be a positive integer`);
+        }
+        // A ceiling a caller can set to a billion is not a ceiling. The hard
+        // ceiling is a code constant; a request may lower a planner ceiling or
+        // move it inside that, never past it.
+        if (planning[key] > HARD_CEILINGS[key]) {
+          throw apiError(
+            API_ERROR_CODES.INVALID_REQUEST,
+            `\`planning.${key}\` is ${planning[key]}, above the hard ceiling of ${HARD_CEILINGS[key]}`,
+            { key, value: planning[key], ceiling: HARD_CEILINGS[key] },
+          );
         }
         limits[key] = planning[key];
       }

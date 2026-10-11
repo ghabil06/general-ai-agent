@@ -36,8 +36,9 @@ import { createEventBus, EVENT_TYPES } from '../observability/events.mjs';
 import { createTraceBuilder, SPAN_TYPES, SPAN_STATUS } from '../observability/traces.mjs';
 import { createStateMachine, STATES } from './state-machine.mjs';
 import { createBudgetTracker, STOP_REASONS, RECOVERABLE_STOP_REASONS } from './budgets.mjs';
+import { resolveEnvelope, mergeTightest } from './envelope.mjs';
 import { newId } from '../util/ids.mjs';
-import { isModelError } from '../models/provider.mjs';
+import { isModelError, ModelError, MODEL_ERROR_CODES } from '../models/provider.mjs';
 import {
   createPlanner,
   snapshotPlan,
@@ -56,15 +57,15 @@ import { createKindedMemory, MEMORY_KIND } from '../memory/kinds.mjs';
  * value for every ceiling. A profile can restrict a run below the runtime
  * default but can never loosen it: `min` in both directions is what makes
  * "the profile is a further restriction" true rather than aspirational.
+ *
+ * Since call 4 the result is also held under `HARD_CEILINGS`
+ * (`src/runtime/envelope.mjs`): a runtime value above a ceiling — an
+ * `AGENT_MAX_ITERATIONS` typo, a programmatic `Infinity` — is clamped, not
+ * honoured. `createAgentRun()` itself sizes a run through `resolveEnvelope()`,
+ * which applies the same rule and also reports what bound each limit.
  */
 export function tightestLimits(runtimeLimits = {}, profileLimits = {}) {
-  const merged = { ...runtimeLimits };
-  for (const [key, value] of Object.entries(profileLimits)) {
-    if (typeof value !== 'number' || !Number.isFinite(value)) continue;
-    const existing = merged[key];
-    merged[key] = typeof existing === 'number' ? Math.min(existing, value) : value;
-  }
-  return merged;
+  return mergeTightest(runtimeLimits, profileLimits);
 }
 
 /** The terminal state a stop reason maps to. */
@@ -78,6 +79,7 @@ export function stateForStopReason(stopReason) {
  * timeout, a malformed answer and an auth failure are reported the same way.
  */
 export function modelFailureStopReason(err, observed = 0, extra = {}) {
+  if (err?.wallClockExceeded === true) return wallClockStopReason(err, observed);
   return {
     code: isModelError(err) ? err.code : 'MODEL_ERROR',
     message: err?.message ?? String(err),
@@ -87,6 +89,54 @@ export function modelFailureStopReason(err, observed = 0, extra = {}) {
     recoverable: false,
     evidence: { retryable: err?.retryable ?? false, ...extra },
   };
+}
+
+/**
+ * The stop reason for a model call that was cut off by the run's own wall-clock
+ * budget. It carries the budget's vocabulary (`WALL_CLOCK_TIMEOUT`), not the
+ * provider's (`TIMEOUT`): the provider did nothing wrong, the run ran out of time.
+ */
+export function wallClockStopReason(err, observed = 0) {
+  return {
+    code: STOP_REASONS.WALL_CLOCK_TIMEOUT,
+    message: err?.message ?? 'wall-clock budget exhausted while waiting for the model',
+    limit: err?.limit ?? null,
+    observed: err?.observed ?? observed,
+    scope: 'time',
+    recoverable: false,
+    evidence: { during: 'model_call' },
+  };
+}
+
+/** How far past the wall-clock budget a tool timeout may land; see `runTool`. */
+const DEADLINE_SLACK_MS = 2;
+
+/**
+ * Internal control flow, never an error a caller sees: carries a stop reason out
+ * of a `try` block to the `catch` that reports it as a stop (rather than as a
+ * planning failure). It cannot escape a loop — every throw site is inside a
+ * `try` whose `catch` recognises it.
+ */
+class LoopStop extends Error {
+  constructor(stopReason) {
+    super(stopReason?.message ?? 'the loop was stopped');
+    this.name = 'LoopStop';
+    this.stopReason = stopReason;
+  }
+}
+
+/**
+ * Thrown by `runModel()` when `cancel()` lands while the call is in flight. The
+ * loops never see it as a failure: they check the cancellation flag first.
+ * Anyone calling `run.runModel()` directly gets a typed error instead of a
+ * promise that settles whenever the provider happens to answer.
+ */
+export class RunCancelledError extends Error {
+  constructor(reason = 'the run was cancelled') {
+    super(reason);
+    this.name = 'RunCancelledError';
+    this.code = STOP_REASONS.CANCELLATION_REQUESTED;
+  }
 }
 
 /**
@@ -112,6 +162,13 @@ export function createAgentRun({
   mode = 'shadow',
   planning = {},
   contextBudget = {},
+  /**
+   * Added in call 4. Per-run limits a caller asks for. They may only TIGHTEN
+   * (the envelope takes the minimum), and nothing may exceed `HARD_CEILINGS`.
+   */
+  limits = {},
+  /** Added in call 4. Tighten the state machine's transition fuel for this run. */
+  maxTransitions = null,
 } = {}) {
   const profile = runtime.getAgentProfile(agentId);
   const effectiveTaskType = taskType ?? profile.taskType;
@@ -125,14 +182,28 @@ export function createAgentRun({
     now: runtime.now,
   });
   const trace = createTraceBuilder({ runId, agentId, now: runtime.now });
+  /**
+   * Every bound on this run, resolved once: runtime budgets, the profile's own
+   * limits and the caller's request, each only able to tighten, all under the
+   * hard ceilings. The budget tracker, the planner and the state machine below
+   * are sized from THIS object, which is also what `run.envelope` reports — so
+   * the envelope a caller is shown is the envelope that is enforced.
+   */
+  const envelope = resolveEnvelope({
+    runtimeLimits: runtime.config.budgets,
+    profileLimits: profile.limits,
+    request: { ...limits, ...(maxTransitions === null ? {} : { maxTransitions }) },
+    planning,
+  });
   const budget = createBudgetTracker({
-    limits: tightestLimits(runtime.config.budgets, profile.limits),
+    limits: envelope.limits,
     now: runtime.now,
   });
   const stateMachine = createStateMachine({
     initial: STATES.IDLE,
     now: runtime.now,
     runId,
+    maxTransitions: envelope.maxTransitions,
     onTransition: (record) => {
       events.emit(EVENT_TYPES.STATE_CHANGED, {
         from: record.from,
@@ -158,21 +229,39 @@ export function createAgentRun({
   const startedAt = runtime.now();
 
   /**
-   * Cooperative cancellation.
+   * One abort signal for the whole run. `cancel()` fires it; `runModel()` races
+   * it against the provider and hands a derived signal to the provider, and
+   * `runTool()` hands it to the executor (so a tool that honours `ctx.signal`
+   * hears the cancel).
+   */
+  const runAbort = new AbortController();
+
+  /**
+   * Cancellation.
    *
-   * `cancel()` marks the run and moves the state machine to CANCELLED if it can
-   * legally do so. The loops check the flag BETWEEN iterations, so a cancel
-   * raised from an event listener (or any other synchronous hook) stops the run
-   * at the next step. What it does NOT do — and this is the honest limitation,
-   * not an oversight — is interrupt a tool or a model call already in flight: a
-   * plain JS function cannot be cancelled, so the call finishes. Tools that do
-   * I/O should honour `ctx.signal` (see `src/tools/executor.mjs`).
+   * `cancel()` marks the run, fires the run's abort signal and moves the state
+   * machine to CANCELLED if it can legally do so.
+   *
+   *  - A MODEL call in flight is abandoned at once: `runModel()` races the
+   *    provider against the signal, so a cancel returns promptly even if the
+   *    provider never answers, and a real provider's HTTP request is aborted.
+   *  - A TOOL call in flight is NOT interrupted — a plain JS function cannot be
+   *    cancelled, and a side effect that has started cannot be un-started. It
+   *    finishes, is recorded, and nothing after it runs. That is the honest
+   *    limit, not an oversight. Tools that do I/O should honour `ctx.signal`.
+   *
+   * The loops check the flag after EVERY await, before any further transition or
+   * side effect (see `cancelStop`). Before call 4 they checked it only between
+   * iterations, so a cancel that landed while a model call was in flight made
+   * the next `transition()` throw from a terminal state and the run was never
+   * recorded.
    *
    * @param {string} [reason]
    */
   function cancel(reason = 'cancelled by the caller') {
     cancelled = true;
     cancelReason = reason;
+    if (!runAbort.signal.aborted) runAbort.abort(new RunCancelledError(reason));
     if (!stateMachine.isTerminal() && stateMachine.can(STATES.CANCELLED)) {
       transition(STATES.CANCELLED, { reason });
     }
@@ -192,6 +281,83 @@ export function createAgentRun({
   }
 
   /**
+   * The checkpoint every loop runs after an await, before it touches the state
+   * machine or starts a side effect. Returns the stop reason (and records the
+   * budget event) when the run has been cancelled in the meantime, else null.
+   */
+  function cancelStop(turn, extra = {}) {
+    if (!cancelled) return null;
+    const stopReason = cancellationStopReason(turn);
+    events.emit(EVENT_TYPES.BUDGET_STOPPED, { stopReason, turn, ...extra });
+    return stopReason;
+  }
+
+  /**
+   * The gate every model-calling turn passes BEFORE it counts an iteration:
+   * the same question the top of each loop asks (`budget.check()` and the loop's
+   * own `maxTurns`), asked at the two planned-loop sites that used to skip it —
+   * the plan proposal and a replan. Those made a model call and recorded an
+   * iteration with no check in front of them, so an odd `maxIterations` was
+   * exceeded by one and a model call was made after the budget was spent.
+   */
+  function budgetGate(turn, maxTurns, extra = {}) {
+    const check = budget.check();
+    if (check.exceeded) {
+      events.emit(EVENT_TYPES.BUDGET_STOPPED, { stopReason: check.stopReason, turn, ...extra });
+      return check.stopReason;
+    }
+    if (turn >= maxTurns) {
+      const stopReason = {
+        code: STOP_REASONS.ITERATION_BUDGET_EXCEEDED,
+        message: `loop reached maxTurns=${maxTurns}`,
+        limit: maxTurns,
+        observed: turn,
+        scope: 'iteration',
+        recoverable: false,
+        evidence: { ...extra },
+      };
+      events.emit(EVENT_TYPES.BUDGET_STOPPED, { stopReason, turn, ...extra });
+      return stopReason;
+    }
+    return null;
+  }
+
+  /**
+   * What `loop()` returns when a fault escapes a loop AFTER the run has started.
+   *
+   * The run is not abandoned: the fault becomes a stop reason, a `run.error`
+   * event, and a FAILED machine, so the caller's `finish()` persists the run,
+   * its trace and its audit row like any other. (Before call 4 such a fault left
+   * events on disk and no run record at all.) A cancelled run reports the
+   * cancellation instead, because the fault is then the machine refusing to move
+   * out of CANCELLED. Nothing is swallowed silently: the message is on the stop
+   * reason and the event.
+   */
+  function faultOutcome(err) {
+    const wasCancelled = cancelled;
+    const message = err?.message ?? String(err);
+    const code = wasCancelled
+      ? STOP_REASONS.CANCELLATION_REQUESTED
+      : err?.code === 'TRANSITION_LIMIT'
+        ? 'TRANSITION_LIMIT'
+        : 'INTERNAL_ERROR';
+    const stopReason = wasCancelled
+      ? cancellationStopReason(budget.iterations)
+      : {
+          code,
+          message,
+          limit: code === 'TRANSITION_LIMIT' ? envelope.maxTransitions : null,
+          observed: stateMachine.seq,
+          scope: 'runtime',
+          recoverable: false,
+          evidence: { error: err?.name ?? 'Error', state: stateMachine.state },
+        };
+    events.emit(EVENT_TYPES.RUN_ERROR, { code, name: err?.name ?? 'Error', message, state: stateMachine.state });
+    if (!stateMachine.isTerminal() && stateMachine.can(STATES.FAILED)) transition(STATES.FAILED, { reason: code });
+    return { finalText: '', turns: budget.iterations, steps: [], stopReason, messages: [], plan: null, context: null, fault: true };
+  }
+
+  /**
    * The planner for this run. Bound to the real tool registry and to this run's
    * profile, so it cannot write a step whose tool the executor would refuse.
    */
@@ -200,9 +366,9 @@ export function createAgentRun({
     profile,
     agentId,
     now: runtime.now,
-    maxSteps: planning.maxSteps,
-    maxReplans: planning.maxReplans,
-    maxStepAttempts: planning.maxStepAttempts,
+    maxSteps: envelope.planning.maxSteps,
+    maxReplans: envelope.planning.maxReplans,
+    maxStepAttempts: envelope.planning.maxStepAttempts,
   });
 
   /** The context manager for this run: this profile's tools, this policy. */
@@ -277,6 +443,93 @@ export function createAgentRun({
   }
 
   /**
+   * Call a provider under three bounds the provider cannot lift, whatever it does.
+   *
+   *  - the run's REMAINING wall-clock: a model call may not outlive the run's
+   *    budget. Before call 4 the clock was read only between iterations, so one
+   *    slow call blew straight through it and a provider that never answered hung
+   *    the run — and, behind the HTTP API's run queue, every run after it.
+   *  - `cancel()`: a call in flight is abandoned the moment the run is cancelled.
+   *  - an abort signal handed to the provider, so a real HTTP request is dropped
+   *    rather than left running behind a result nobody will read.
+   *
+   * The provider's own timeout (30 s / 60 s for the real ones) still applies; this
+   * is an additional ceiling, never a longer one — no `timeoutMs` is passed, so
+   * nothing a provider defaults to is raised.
+   *
+   * The abandoned provider promise gets a no-op catch: it may still reject later,
+   * and an unhandled rejection must not be able to take the process down.
+   */
+  async function callProvider(providerInstance, callRequest, routing) {
+    if (cancelled) throw new RunCancelledError(cancelReason ?? 'the run was cancelled');
+    const limit = budget.limits.wallClockMs;
+    const remainingMs = budget.remaining().wallClockMs;
+    if (remainingMs <= 0) throw wallClockExpired(limit, budget.elapsedMs(), routing);
+
+    const controller = new AbortController();
+    let timer = null;
+    let onCancel = null;
+    const guard = new Promise((_, reject) => {
+      timer = setTimeout(() => {
+        const error = wallClockExpired(limit, budget.elapsedMs(), routing);
+        controller.abort(error);
+        reject(error);
+      }, Math.max(1, Math.ceil(remainingMs)));
+      onCancel = () => {
+        const error = new RunCancelledError(cancelReason ?? 'the run was cancelled');
+        controller.abort(error);
+        reject(error);
+      };
+      runAbort.signal.addEventListener('abort', onCancel, { once: true });
+    });
+
+    let call;
+    try {
+      call = Promise.resolve(providerInstance.complete({ ...callRequest, signal: controller.signal }));
+    } catch (err) {
+      call = Promise.reject(err);
+    }
+    call.catch(() => {});
+
+    try {
+      return await Promise.race([call, guard]);
+    } finally {
+      clearTimeout(timer);
+      runAbort.signal.removeEventListener('abort', onCancel);
+    }
+  }
+
+  function wallClockExpired(limit, observed, routing) {
+    const error = new ModelError(
+      MODEL_ERROR_CODES.TIMEOUT,
+      `the run's wall-clock budget (${limit}ms) ran out while waiting for ${routing?.provider ?? 'the model'}`,
+      { provider: routing?.provider ?? null, model: routing?.model ?? null, retryable: false },
+    );
+    error.wallClockExceeded = true;
+    error.limit = limit;
+    error.observed = observed;
+    return error;
+  }
+
+  /**
+   * Token accounting trusts the provider's usage report — but a provider that
+   * reports none (a custom one, a bug) must not make the token budget a no-op.
+   * Only a MISSING report is replaced by an estimate; a reported zero is taken
+   * at its word, because that is what the deterministic test double says.
+   */
+  function usageOrEstimate(completion, messages) {
+    const usage = completion?.usage;
+    const reported =
+      usage !== null &&
+      typeof usage === 'object' &&
+      ['promptTokens', 'completionTokens', 'totalTokens'].some((key) => Number.isFinite(usage[key]));
+    if (reported) return usage;
+    const promptTokens = estimateTokens(messages);
+    const completionTokens = estimateTokens([{ content: completion?.text ?? '', toolCalls: completion?.toolCalls ?? [] }]);
+    return { promptTokens, completionTokens, totalTokens: promptTokens + completionTokens, estimated: true };
+  }
+
+  /**
    * Route + call the model, accounting tokens and recording the call.
    *
    * @param {object}   request
@@ -317,21 +570,22 @@ export function createAgentRun({
     });
 
     try {
-      const completion = await providerInstance.complete({ messages, tools, responseFormat });
-      budget.recordTokens(completion.usage);
+      const completion = await callProvider(providerInstance, { messages, tools, responseFormat }, routing);
+      const usage = usageOrEstimate(completion, messages);
+      budget.recordTokens(usage);
       modelCalls.push({
         provider: routing.provider,
         model: routing.model,
         routeId: routing.routeId,
-        usage: completion.usage,
+        usage,
         toolCalls: completion.toolCalls.map((call) => call.name),
         at: runtime.now(),
       });
       trace.endSpan(spanId, {
         status: SPAN_STATUS.OK,
-        output: { text: completion.text, toolCalls: completion.toolCalls, usage: completion.usage },
+        output: { text: completion.text, toolCalls: completion.toolCalls, usage },
       });
-      return { completion, routing, usage: completion.usage };
+      return { completion, routing, usage };
     } catch (err) {
       const isTimeout = err?.code === 'TIMEOUT';
       trace.endSpan(spanId, {
@@ -361,6 +615,54 @@ export function createAgentRun({
     };
     toolCalls.push(call);
 
+    // Every ATTEMPT is charged against `maxToolCalls`, not only the calls that get
+    // as far as the executor's budget step. A call that fails schema validation, or
+    // names a tool that does not exist, never reaches that step — so before call 4 a
+    // single completion carrying thousands of invalid calls was ground through in
+    // full while the tool-call budget counted zero (measured: 10 000 recorded
+    // attempts, budget 0, stopped only by the iteration budget). The attempt ledger
+    // is `toolCalls`, which already holds this call; the (N+1)th attempt is refused,
+    // recorded, and stops the loop exactly as the executor's own budget refusal does.
+    const attemptLimit = budget.limits.maxToolCalls;
+    if (toolCalls.length > attemptLimit) {
+      const stopReason = {
+        code: STOP_REASONS.TOOL_CALL_BUDGET_EXCEEDED,
+        message: `tool-call budget exhausted: ${toolCalls.length} attempts exceed ${attemptLimit} (a call that fails validation or is refused still counts as an attempt)`,
+        limit: attemptLimit,
+        observed: toolCalls.length,
+        scope: 'tool',
+        recoverable: false,
+        evidence: { attempts: toolCalls.length, executed: budget.toolCalls, tool: toolName },
+      };
+      events.emit(EVENT_TYPES.BUDGET_STOPPED, { stopReason, tool: toolName });
+      trace.recordSpan({
+        name: `tool:${toolName}`,
+        type: SPAN_TYPES.TOOL_CALL,
+        parentId: rootSpanId,
+        input: args,
+        status: SPAN_STATUS.BLOCKED,
+        output: { status: 'BUDGET_EXCEEDED', attempts: toolCalls.length },
+      });
+      return Object.freeze({
+        status: 'BUDGET_EXCEEDED',
+        ok: false,
+        executed: false,
+        finishedAt: runtime.now(),
+        runId,
+        sessionId,
+        agentId,
+        toolName,
+        args,
+        startedAt: call.at,
+        durationMs: 0,
+        tool: toolName,
+        policy: null,
+        approval: null,
+        result: null,
+        error: { code: stopReason.code, message: stopReason.message, stopReason },
+      });
+    }
+
     // The trace records the whole pipeline for this call: the proposal, the
     // policy verdict that gated it, and the result — so a finished run can be
     // read as "what was asked, what was decided, what happened".
@@ -371,6 +673,21 @@ export function createAgentRun({
       input: args,
     });
 
+    // A tool is never given longer than the run has left. The executor's own
+    // precedence (per-call, then the tool's declaration, then its default) is
+    // untouched; a per-call value is only ever passed here when it is TIGHTER
+    // than the one that would have applied.
+    //
+    // The bound is `remaining + DEADLINE_SLACK_MS`, not `remaining`: a Node timer
+    // can fire a millisecond EARLY relative to `Date.now()`, which would leave the
+    // budget check reading "199 of 200ms used" and let the stop reason depend on
+    // a race. With the slack the timeout can only fire once the budget is spent,
+    // so it is the budget check that reports the stop, deterministically. The
+    // run overruns its budget by at most the slack.
+    const effectiveTimeoutMs = toolTimeoutMs ?? runtime.registry.get(toolName)?.timeoutMs ?? runtime.executor.defaultTimeoutMs;
+    const boundMs = Math.max(1, Math.ceil(budget.remaining().wallClockMs)) + DEADLINE_SLACK_MS;
+    const boundedTimeoutMs = Number.isFinite(effectiveTimeoutMs) && boundMs < effectiveTimeoutMs ? boundMs : toolTimeoutMs;
+
     const result = await runtime.executor.execute({
       toolName,
       args,
@@ -380,11 +697,17 @@ export function createAgentRun({
       sessionId,
       untrusted,
       evidence,
-      history: { toolCalls },
+      // The calls made BEFORE this one: the rate-limit rule's contract is "N
+      // already recorded, so the next may not run". `toolCalls` already holds the
+      // call under evaluation (pushed above, so a denied call is still on the
+      // run's record), and handing that over made the rule count it twice —
+      // `maxToolCalls: N` executed N-1 calls, and `maxToolCalls: 1` executed none.
+      history: { toolCalls: toolCalls.slice(0, -1) },
       limits: budget.limits,
       approvalId,
       budget,
-      toolTimeoutMs,
+      signal: runAbort.signal,
+      toolTimeoutMs: boundedTimeoutMs,
       // The executor is shared by every run, so the run hands in ITS bus: the
       // events of this tool call must land in this run's stream.
       events,
@@ -612,18 +935,26 @@ export function createAgentRun({
           responseFormat,
         });
       } catch (err) {
-        stopReason = {
-          code: isModelError(err) ? err.code : 'MODEL_ERROR',
-          message: err?.message ?? String(err),
-          limit: null,
-          observed: turn,
-          scope: 'model',
-          recoverable: false,
-          evidence: { provider: provider ?? 'routed' },
-        };
-        transition(STATES.FAILED, { reason: stopReason.code });
+        // A cancel that lands during the call is a cancellation, not a model failure.
+        if ((stopReason = cancelStop(turn))) break;
+        stopReason =
+          err?.wallClockExceeded === true
+            ? wallClockStopReason(err, turn)
+            : {
+                code: isModelError(err) ? err.code : 'MODEL_ERROR',
+                message: err?.message ?? String(err),
+                limit: null,
+                observed: turn,
+                scope: 'model',
+                recoverable: false,
+                evidence: { provider: provider ?? 'routed' },
+              };
+        if (stateMachine.can(STATES.FAILED)) transition(STATES.FAILED, { reason: stopReason.code });
         break;
       }
+      // …and an answer that arrives after the cancel is dropped, before it can
+      // move the machine or start a tool.
+      if ((stopReason = cancelStop(turn))) break;
 
       const { completion, routing } = modelResult;
       messages.push({ role: 'assistant', content: completion.text, toolCalls: completion.toolCalls });
@@ -643,6 +974,10 @@ export function createAgentRun({
       for (const call of completion.toolCalls) {
         const result = await runTool(call.name, call.arguments, { untrusted, evidence, approvalId });
         lastObservation = observeToolCall({ call, turn, result, messages, steps });
+        // The call has finished and is on record. If the run was cancelled while
+        // it ran, nothing after it may: not the next call in this turn, and not a
+        // transition out of CANCELLED.
+        if (cancelled) break;
 
         if (result.status === 'APPROVAL_REQUIRED') {
           transition(STATES.WAITING_FOR_APPROVAL, { approvalStatus: 'pending' });
@@ -839,6 +1174,8 @@ export function createAgentRun({
           // Ask the model to decompose the goal. Whatever it proposes is
           // validated against the registry and the profile before it becomes a
           // plan, so a proposal naming an unauthorised tool is a refused plan.
+          const refused = cancelStop(turn, { phase: 'planning' }) ?? budgetGate(turn, maxTurns, { phase: 'planning' });
+          if (refused) throw new LoopStop(refused);
           turn += 1;
           budget.recordIteration({ turn, phase: 'planning' });
           const proposalResult = await runModel({
@@ -869,11 +1206,22 @@ export function createAgentRun({
       }
     }
 
+    // A budget or a cancel that refused the proposal turn is a stop, not a plan
+    // error — and so is a cancel that landed while the proposal was in flight.
+    if (planError instanceof LoopStop || (planError && cancelled)) {
+      stopReason = planError instanceof LoopStop ? planError.stopReason : cancelStop(turn, { phase: 'planning' });
+      trace.endSpan(planSpanId, { status: SPAN_STATUS.BLOCKED, output: { stopReason: stopReason.code } });
+      return { finalText: '', turns: turn, steps: stepsTaken, stopReason, messages, plan: null, planSummary: null, context: window.assembled };
+    }
+
     if (planError) {
       const code = planError.code ?? 'PLAN_ERROR';
       const reason = planError.message ?? String(planError);
       events.emit(EVENT_TYPES.VALIDATION_FAILED, { reason: 'plan_rejected', code, message: reason });
-      stopReason = { code, message: reason, limit: null, observed: turn, scope: 'planning', recoverable: false, evidence: {} };
+      stopReason =
+        planError.wallClockExceeded === true
+          ? wallClockStopReason(planError, turn)
+          : { code, message: reason, limit: null, observed: turn, scope: 'planning', recoverable: false, evidence: {} };
       trace.endSpan(planSpanId, { status: SPAN_STATUS.BLOCKED, error: planError });
       // A rejected plan cannot be validated or revised: it was refused. The
       // machine goes straight to FAILED, which every pre-terminal state allows.
@@ -925,13 +1273,17 @@ export function createAgentRun({
         enterExecuting({ phase: 'synthesis' });
         try {
           const synthesis = await runModel({ messages, tools: [], requiresTools: false, responseFormat });
-          finalText = synthesis.completion.text || finalText;
-          if (finalText) messages.push({ role: 'assistant', content: finalText });
+          if (!cancelled) {
+            finalText = synthesis.completion.text || finalText;
+            if (finalText) messages.push({ role: 'assistant', content: finalText });
+          }
         } catch (err) {
+          if ((stopReason = cancelStop(turn, { phase: 'synthesis' }))) break;
           stopReason = modelFailureStopReason(err, turn);
-          transition(STATES.FAILED, { reason: stopReason.code });
+          if (stateMachine.can(STATES.FAILED)) transition(STATES.FAILED, { reason: stopReason.code });
           break;
         }
+        if ((stopReason = cancelStop(turn, { phase: 'synthesis' }))) break;
         stepsTaken.push({ turn, kind: 'final', text: finalText });
         enterValidating({ valid: true });
         // `VALIDATING -> COMPLETED` is guarded on `meta.valid`: pass the guard
@@ -1000,41 +1352,66 @@ export function createAgentRun({
             tools: toolDefinitions,
             responseFormat,
           });
-          messages.push({ role: 'assistant', content: stepTurn.completion.text, toolCalls: stepTurn.completion.toolCalls });
 
-          if (stepTurn.completion.toolCalls.length) {
-            transition(STATES.WAITING_FOR_TOOL);
-            for (const call of stepTurn.completion.toolCalls) {
-              const result = await runTool(call.name, call.arguments, { untrusted, evidence, approvalId });
-              const observation = observeToolCall({ call, turn, result, messages, steps: stepsTaken, stepId: step.id });
-              if (result.status === 'APPROVAL_REQUIRED') {
-                blocked = { kind: 'approval', result };
-                break;
+          if (cancelled) {
+            // The answer arrived after the cancel: it is dropped, and it must not
+            // start a tool. The stop is recorded below with the step's outcome.
+            stopReason = cancelStop(turn, { stepId: step.id });
+          } else {
+            messages.push({ role: 'assistant', content: stepTurn.completion.text, toolCalls: stepTurn.completion.toolCalls });
+
+            if (stepTurn.completion.toolCalls.length) {
+              transition(STATES.WAITING_FOR_TOOL);
+              for (const call of stepTurn.completion.toolCalls) {
+                const result = await runTool(call.name, call.arguments, { untrusted, evidence, approvalId });
+                const observation = observeToolCall({ call, turn, result, messages, steps: stepsTaken, stepId: step.id });
+                if (result.status === 'APPROVAL_REQUIRED') {
+                  blocked = { kind: 'approval', result };
+                  break;
+                }
+                if (result.status === 'POLICY_DENIED') {
+                  blocked = { kind: 'policy_denied', result };
+                  break;
+                }
+                if (result.status === 'BUDGET_EXCEEDED') {
+                  // A budget refusal is a STOP, as it is in the model loop and in a
+                  // tool step: the rest of this turn's calls are not processed.
+                  stopReason = result.error?.stopReason ?? {
+                    code: STOP_REASONS.TOOL_CALL_BUDGET_EXCEEDED,
+                    message: 'tool budget exceeded',
+                    recoverable: false,
+                  };
+                  events.emit(EVENT_TYPES.BUDGET_STOPPED, { stopReason, tool: call.name });
+                  break;
+                }
+                if (!result.ok) {
+                  stepOk = false;
+                  stepError = result.error ?? { message: 'a tool call inside the step did not succeed' };
+                } else if (!cancelled && stateMachine.is(STATES.WAITING_FOR_TOOL)) {
+                  // ONE observation per turn, however many calls it carried.
+                  // Before call 4 this transition ran per call, so a second call
+                  // asked for OBSERVING -> OBSERVING and failed the whole run
+                  // with a misleading MODEL_ERROR after both tools had executed.
+                  transition(STATES.OBSERVING, { toolResult: observation });
+                }
+                if (cancelled) {
+                  stopReason = cancellationStopReason(turn);
+                  events.emit(EVENT_TYPES.BUDGET_STOPPED, { stopReason, turn, stepId: step.id });
+                  break;
+                }
               }
-              if (result.status === 'POLICY_DENIED') {
-                blocked = { kind: 'policy_denied', result };
-                break;
-              }
-              if (!result.ok) {
-                stepOk = false;
-                stepError = result.error ?? { message: 'a tool call inside the step did not succeed' };
-              } else if (!cancelled) {
-                transition(STATES.OBSERVING, { toolResult: observation });
-              }
-              if (cancelled) {
-                stopReason = cancellationStopReason(turn);
-                events.emit(EVENT_TYPES.BUDGET_STOPPED, { stopReason, turn, stepId: step.id });
-                break;
-              }
+            } else if (stepTurn.completion.text) {
+              finalText = stepTurn.completion.text;
             }
-          } else if (stepTurn.completion.text) {
-            finalText = stepTurn.completion.text;
           }
         } catch (err) {
-          stopReason = modelFailureStopReason(err, turn);
-          trace.endSpan(stepSpanId, { status: SPAN_STATUS.ERROR, error: err });
-          transition(STATES.FAILED, { reason: stopReason.code });
-          break;
+          // A cancel that lands during the call falls through to the stop handling below.
+          if (!(stopReason = cancelStop(turn, { stepId: step.id }))) {
+            stopReason = modelFailureStopReason(err, turn);
+            trace.endSpan(stepSpanId, { status: SPAN_STATUS.ERROR, error: err });
+            if (stateMachine.can(STATES.FAILED)) transition(STATES.FAILED, { reason: stopReason.code });
+            break;
+          }
         }
       }
 
@@ -1122,6 +1499,10 @@ export function createAgentRun({
         } else if (Array.isArray(replanSteps) && replanSteps.length) {
           replacement = replanSteps;
         } else {
+          // A replan is a model call AND an iteration, so it passes the same gate
+          // as every other turn — before it is counted, not after.
+          const refused = cancelStop(turn, { phase: 'replan' }) ?? budgetGate(turn, maxTurns, { phase: 'replan', plan: plan.planId });
+          if (refused) throw new LoopStop(refused);
           turn += 1;
           budget.recordIteration({ turn, phase: 'replan', failedStepId: step.id });
           const request = await runModel({
@@ -1141,6 +1522,8 @@ export function createAgentRun({
           });
           messages.push({ role: 'assistant', content: request.completion.text });
           replacement = stepsFromProposal(request.completion.text);
+          // A cancel that landed during the call: drop the proposal.
+          if (cancelled) throw new LoopStop(cancelStop(turn, { phase: 'replan' }));
         }
 
         if (!replacement || !replacement.length) {
@@ -1151,17 +1534,28 @@ export function createAgentRun({
         // The next iteration's `enterExecuting()` moves PLANNING -> EXECUTING,
         // so the guarded table stays the only way to change state.
       } catch (err) {
+        const stop = err instanceof LoopStop ? err.stopReason : cancelled ? cancelStop(turn, { phase: 'replan' }) : null;
+        if (stop) {
+          // A budget or a cancel, not a planning failure: report it as itself.
+          // The plan is closed out below like any plan left open by a stop, and
+          // the machine is left for `finish()` to settle, as at the top of the loop.
+          stopReason = stop;
+          break;
+        }
         const code = err?.code ?? 'REPLAN_FAILED';
         events.emit(EVENT_TYPES.VALIDATION_FAILED, { reason: 'replan_rejected', code, message: err?.message ?? String(err) });
-        stopReason = {
-          code,
-          message: err?.message ?? String(err),
-          limit: planner.limits.maxReplans,
-          observed: turn,
-          scope: 'planning',
-          recoverable: false,
-          evidence: { stepId: step.id },
-        };
+        stopReason =
+          err?.wallClockExceeded === true
+            ? wallClockStopReason(err, turn)
+            : {
+                code,
+                message: err?.message ?? String(err),
+                limit: planner.limits.maxReplans,
+                observed: turn,
+                scope: 'planning',
+                recoverable: false,
+                evidence: { stepId: step.id },
+              };
         try {
           planner.complete(plan, { status: PLAN_STATUS.FAILED, outcome: { reason: code } });
         } catch { /* already terminal */ }
@@ -1218,11 +1612,18 @@ export function createAgentRun({
    */
   async function loop(request = {}) {
     const mode = request.mode ?? 'model';
-    if (mode === 'planned' || mode === 'plan') return plannedLoop(request);
-    if (mode !== 'model') {
+    if (mode !== 'planned' && mode !== 'plan' && mode !== 'model') {
       throw new TypeError(`loop: unknown mode "${mode}" (known: model, planned)`);
     }
-    return modelLoop(request);
+    try {
+      return mode === 'model' ? await modelLoop(request) : await plannedLoop(request);
+    } catch (err) {
+      // A fault BEFORE the run left IDLE is a caller error — a bad argument, a
+      // window that could not be assembled — and is thrown, as it always was.
+      // A fault after that is a run fault: contain it, record it, close it.
+      if (stateMachine.is(STATES.IDLE)) throw err;
+      return faultOutcome(err);
+    }
   }
 
   /**
@@ -1401,6 +1802,13 @@ export function createAgentRun({
     events,
     trace,
     budget,
+    /**
+     * Every bound on this run and what set it (call 4): the budget limits, the
+     * planner ceilings and the state machine's transition fuel, each with the
+     * layer that bound it. This is the envelope that is ENFORCED — the budget
+     * tracker, planner and machine were sized from this very object.
+     */
+    envelope,
     stateMachine,
     /** Goal decomposition, bound to this run's registry + profile. */
     planner,
