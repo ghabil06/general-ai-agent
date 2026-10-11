@@ -523,10 +523,89 @@ export function summarizePlan(plan) {
   };
 }
 
+/** How much of a model reply is scanned for an embedded plan, and how many candidates are tried. */
+const PROPOSAL_SCAN = Object.freeze({ maxChars: 200_000, maxBlocks: 16 });
+
 /**
- * Parse a plan proposal a model produced (JSON), tolerating the shapes a model
- * actually emits: `{steps:[...]}`, `[...]`, or a single step object.
- * Returns raw step data for `planner.plan()` to validate — never a plan.
+ * Every top-level balanced `{…}` / `[…]` block in `text`, in order, at most
+ * `PROPOSAL_SCAN.maxBlocks` of them. One linear pass: string literals and their
+ * escapes are skipped, so a brace inside a `"description"` does not end a block,
+ * and a mismatched closer abandons the block rather than backtracking.
+ */
+function* jsonBlocks(text) {
+  const closers = [];
+  let start = -1;
+  let inString = false;
+  let escaped = false;
+  let yielded = 0;
+  for (let i = 0; i < text.length && yielded < PROPOSAL_SCAN.maxBlocks; i += 1) {
+    const ch = text[i];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (ch === '\\') escaped = true;
+      else if (ch === '"') inString = false;
+      continue;
+    }
+    if (ch === '"' && closers.length) {
+      inString = true;
+    } else if (ch === '{' || ch === '[') {
+      if (!closers.length) start = i;
+      closers.push(ch === '{' ? '}' : ']');
+    } else if ((ch === '}' || ch === ']') && closers.length) {
+      if (closers[closers.length - 1] !== ch) {
+        closers.length = 0;
+        start = -1;
+        continue;
+      }
+      closers.pop();
+      if (!closers.length && start >= 0) {
+        yielded += 1;
+        yield text.slice(start, i + 1);
+        start = -1;
+      }
+    }
+  }
+}
+
+/** A value that is recognisably a plan, not merely JSON — used only when scanning prose. */
+function isPlanShaped(value) {
+  const stepLike = (step) => step !== null && typeof step === 'object' && typeof step.description === 'string';
+  if (Array.isArray(value)) return value.length > 0 && value.every(stepLike);
+  if (value !== null && typeof value === 'object') {
+    if (Array.isArray(value.steps)) return value.steps.length > 0 && value.steps.every(stepLike);
+    return stepLike(value);
+  }
+  return false;
+}
+
+/** The first plan-shaped JSON block inside prose or a markdown fence, or null. */
+function stepsFromText(text) {
+  const source = text.length > PROPOSAL_SCAN.maxChars ? text.slice(0, PROPOSAL_SCAN.maxChars) : text;
+  for (const block of jsonBlocks(source)) {
+    let parsed;
+    try {
+      parsed = JSON.parse(block);
+    } catch {
+      continue; // `[see below]`, `{a plan}` — balanced, but not JSON
+    }
+    if (isPlanShaped(parsed)) return stepsFromProposal(parsed);
+  }
+  return null;
+}
+
+/**
+ * Parse a plan proposal a model produced, tolerating the shapes a model
+ * actually emits: `{steps:[...]}`, `[...]`, or a single step object — bare, or
+ * (since call 4) wrapped in a markdown fence or a sentence, which is how real
+ * models usually answer even when told "reply with JSON only".
+ *
+ * Returns raw step data for `planner.plan()` to validate — never a plan. That
+ * is the whole safety argument for being lenient here: this function only
+ * decides what text to LOOK at. Whatever it returns still goes through the
+ * planner, which checks every tool against the registry and the agent's
+ * allowlist and enforces the step ceiling, so a tolerant parse cannot widen
+ * what the agent may do. The scan is one linear pass over at most
+ * `PROPOSAL_SCAN.maxChars` characters and tries at most `maxBlocks` candidates.
  */
 export function stepsFromProposal(proposal) {
   if (proposal === null || proposal === undefined) return null;
@@ -534,7 +613,7 @@ export function stepsFromProposal(proposal) {
     try {
       return stepsFromProposal(JSON.parse(proposal));
     } catch {
-      return null;
+      return stepsFromText(proposal);
     }
   }
   if (Array.isArray(proposal)) return proposal;

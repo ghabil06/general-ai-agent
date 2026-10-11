@@ -34,6 +34,8 @@ import { MEMORY_KINDS } from '../src/memory/kinds.mjs';
 import { loadAgent, listAgentIds, listSvcAgentIds } from '../src/agents/index.mjs';
 import { createRuntimeApi } from '../src/api/index.mjs';
 import { buildOfflinePlan, validateScriptAgainstSchemas } from '../src/api/offline.mjs';
+import { BoundedAgentError, BOUNDED_ERROR_CODES } from '../src/runtime/bounded-agent.mjs';
+import { HARD_CEILINGS } from '../src/runtime/envelope.mjs';
 
 const failures = [];
 const notes = [];
@@ -477,6 +479,158 @@ const cancelResponse = await api.handle({
 check(cancelResponse.status === 200 && JSON.parse(cancelResponse.body).state === 'CANCELLED', 'a paused run can be cancelled through the API');
 const cancelAgain = await api.handle({ method: 'POST', pathname: `/api/runtime/runs/${paused.runId}/cancel`, rawBody: '{}' });
 check(cancelAgain.status === 409 && JSON.parse(cancelAgain.body).error.code === 'RUN_NOT_CANCELLABLE', 'cancelling a terminal run is a 409');
+
+// ── 13. call 4: the bounded tool-calling state machine (General AI Agents) ──
+//
+// Every adversary below is a test double: it proves the RUNTIME stops, and says
+// nothing about how a live model behaves.
+console.log('\n--- bounded execution (call 4) ---\n');
+
+function boundedRuntime(options = {}) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'verify-bounded-'));
+  return createRuntime({
+    config: loadConfig({ NODE_ENV: 'test', AGENT_STORAGE_DIR: dir }, { storageDir: dir, fixturesDir: config.fixturesDir, defaultProvider: 'mock' }),
+    storageDir: dir,
+    fixturesDir: config.fixturesDir,
+    ...options,
+  });
+}
+const DOUBLE = { tools: true, json: true, streaming: false, maxContextTokens: 128_000, deterministic: false, mock: true };
+const planOf = (steps) => ({ text: JSON.stringify({ steps }) });
+const PLAN = [
+  { id: 's1', description: 'Get the AAPL quote', tool: 'get_market_quote', args: { ticker: 'AAPL' } },
+  { id: 's2', description: 'Get the paper portfolio state', tool: 'get_portfolio_state', args: {} },
+];
+
+{
+  const rt = boundedRuntime({ mockScript: [planOf(PLAN), { text: 'AAPL quote and portfolio, summarised.' }] });
+  const agent = rt.boundedAgent();
+  const description = agent.describe();
+  check(description.algorithm === 'bounded tool-calling state machine' && description.states.length === 13, 'the bounded agent describes itself: the algorithm and the 13-state machine');
+  check(Object.isFrozen(HARD_CEILINGS) && Object.values(HARD_CEILINGS).every((v) => Number.isInteger(v) && v > 0), 'the hard ceilings are frozen, finite, positive integers');
+
+  const done = await agent.execute({ goal: 'Report the AAPL quote and the paper portfolio state.' });
+  check(done.ok && done.status === 'COMPLETED' && done.strategy.name === 'planned', 'a flexible task is planned by the model and completes (strategy auto -> planned)');
+  check(
+    done.executedTools.join() === 'get_market_quote,get_portfolio_state' && done.usage.modelCalls === 2,
+    'the plan ran step by step through the executor: 2 tool calls, 2 model calls (plan + summary)',
+  );
+  check(done.provider.mock === true && /test double/.test(done.notice), 'the result says the provider was a test double (mock vs real is labelled, not implied)');
+  const stored = { run: rt.runStore.getRun(done.runId), trace: rt.runStore.getTrace(done.runId), audit: rt.runStore.readAudit().records.filter((row) => row.runId === done.runId) };
+  check(stored.run?.status === 'COMPLETED' && Boolean(stored.trace) && stored.audit.length > 0, 'the run, its trace and its audit row are on disk, read back from the store');
+  const events = rt.runStore.runEvents(done.runId);
+  check(
+    events.filter((e) => e.type === EVENT_TYPES.TOOL_EXECUTED).every((e) => events.some((p) => p.type === EVENT_TYPES.POLICY_DECIDED && p.payload.tool === e.payload.tool && p.payload.decision === 'ALLOW' && p.seq < e.seq)),
+    'every executed tool had an earlier ALLOW verdict from the policy kernel in the same run',
+  );
+}
+
+{
+  const rt = boundedRuntime({ mockScript: [planOf([{ id: 's1', description: 'place an order', tool: 'submit_paper_order', args: { ticker: 'AAPL', side: 'buy', quantity: 1 } }])] });
+  const refused = await rt.boundedAgent().execute({ goal: 'trade AAPL' });
+  check(refused.status === 'FAILED' && refused.stopReason.code === 'PLAN_TOOL_NOT_PERMITTED' && refused.toolCalls.length === 0, 'a plan naming a tool outside the allowlist is refused before any tool is asked to run');
+}
+
+{
+  let calls = 0;
+  const runaway = {
+    model: 'runaway-double',
+    capabilities: () => DOUBLE,
+    async complete() {
+      calls += 1;
+      return { text: '', toolCalls: [{ id: `c${calls}`, name: 'get_market_quote', arguments: { ticker: `T${calls}` } }], usage: { promptTokens: 10, completionTokens: 5, totalTokens: 15 } };
+    },
+  };
+  const rt = boundedRuntime({ providers: { mock: runaway } });
+  const stopped = await rt.boundedAgent().execute({ goal: 'never stop', strategy: 'direct' });
+  check(
+    !stopped.ok && stopped.stopReason.code === 'ITERATION_BUDGET_EXCEEDED' && calls === stopped.envelope.limits.maxIterations,
+    `a model that asks for a fresh tool call forever is stopped by the budget: ${calls} calls = maxIterations ${stopped.envelope.limits.maxIterations}`,
+  );
+  check(stopped.usage.transitions <= stopped.envelope.maxTransitions, 'the state machine stayed inside its transition fuel');
+  check(rt.runStore.getRun(stopped.runId)?.status === stopped.status, 'and the stopped run is recorded with the status it reported');
+}
+
+{
+  const rt = boundedRuntime({ mockScript: [{ text: 'x' }] });
+  const before = rt.runStore.stores.runs.count();
+  const outcomes = [];
+  for (const task of [{ goal: 'x', limits: { maxIterations: HARD_CEILINGS.maxIterations + 1 } }, { goal: 'x', limits: { maxBananas: 1 } }, { goal: 'x', strategy: 'yolo' }, { goal: '' }, { goal: 'x', provider: 'openai' }]) {
+    try {
+      await rt.boundedAgent().execute(task);
+      outcomes.push('ran');
+    } catch (err) {
+      outcomes.push(err instanceof BoundedAgentError ? err.code : 'other');
+    }
+  }
+  check(
+    outcomes.join() === [BOUNDED_ERROR_CODES.LIMIT_REJECTED, BOUNDED_ERROR_CODES.LIMIT_REJECTED, BOUNDED_ERROR_CODES.UNKNOWN_STRATEGY, BOUNDED_ERROR_CODES.INVALID_TASK, BOUNDED_ERROR_CODES.PROVIDER_NOT_CONFIGURED].join() &&
+      rt.runStore.stores.runs.count() === before,
+    'a request above a hard ceiling, an unknown limit or strategy, an empty goal and an unconfigured provider are each refused with a typed error, and create no run',
+  );
+}
+
+{
+  // One completion carrying 5000 tool calls, every one schema-invalid: they fail BEFORE the executor's
+  // budget step, so only an attempt ledger can bound them.
+  let turns = 0;
+  const flood = {
+    model: 'flood-double',
+    capabilities: () => DOUBLE,
+    async complete() {
+      turns += 1;
+      return { text: '', toolCalls: Array.from({ length: 5000 }, (_, i) => ({ id: `c${i}`, name: 'get_market_quote', arguments: { ticker: i } })), usage: { promptTokens: 5, completionTokens: 5, totalTokens: 10 } };
+    },
+  };
+  const rt = boundedRuntime({ providers: { mock: flood } });
+  const flooded = await rt.boundedAgent().execute({ goal: 'flood', strategy: 'direct' });
+  const cap = flooded.envelope.limits.maxToolCalls;
+  check(
+    flooded.stopReason?.code === 'TOOL_CALL_BUDGET_EXCEEDED' && flooded.toolCalls.length === cap + 1 && flooded.executedTools.length === 0 && turns === 1,
+    `one completion carrying 5000 invalid tool calls is cut off at ${flooded.toolCalls.length} recorded attempts (maxToolCalls ${cap}), not ground through`,
+  );
+}
+
+{
+  const hung = { model: 'hung-double', capabilities: () => DOUBLE, complete: () => new Promise(() => {}) };
+  const rt = boundedRuntime({ providers: { mock: hung } });
+  const startedAt = Date.now();
+  const timedOut = await rt.boundedAgent().execute({ goal: 'wait forever', strategy: 'direct', limits: { wallClockMs: 150 } });
+  check(
+    timedOut.stopReason?.code === 'WALL_CLOCK_TIMEOUT' && Date.now() - startedAt < 2000,
+    `a provider that never answers cannot hang a run: stopped by the wall-clock deadline in ${Date.now() - startedAt}ms (budget 150ms)`,
+  );
+  check(rt.runStore.getRun(timedOut.runId)?.status === 'FAILED', 'and that run is recorded');
+}
+
+{
+  const rt = boundedRuntime({ mockScript: [{ text: 'a slow answer', delayMs: 1500 }] });
+  const controller = new AbortController();
+  setTimeout(() => controller.abort(new Error('verify-runtime cancelled it')), 40);
+  const startedAt = Date.now();
+  const cancelled = await rt.boundedAgent().execute({ goal: 'slow', strategy: 'direct', signal: controller.signal });
+  check(
+    cancelled.status === 'CANCELLED' && Date.now() - startedAt < 1000 && rt.runStore.getRun(cancelled.runId)?.status === 'CANCELLED',
+    `aborting a run in flight cancels it without waiting out the model (${Date.now() - startedAt}ms of a 1500ms call), and records it CANCELLED`,
+  );
+}
+
+{
+  const rt = boundedRuntime({ mockScript: [{ toolCalls: [{ name: 'no_op', arguments: {} }] }, { text: 'done' }] });
+  const fuel = await rt.boundedAgent().execute({ goal: 'go', strategy: 'direct', limits: { maxTransitions: 4 } });
+  check(fuel.stopReason?.code === 'TRANSITION_LIMIT' && fuel.usage.transitions <= 5 && fuel.status === 'FAILED', 'the state machine has its own bound: spent transition fuel stops the run (TRANSITION_LIMIT), never mid-air');
+}
+
+{
+  const rt = boundedRuntime({ mockScript: [{ text: 'escalation recorded' }] });
+  const agent = rt.boundedAgent({ agentId: 'svc_03' });
+  const steps = [{ id: 's1', description: 'hand the invoice to a human', tool: 'request_human_approval', args: { reason: 'over the $500.00 ceiling', payload: { invoice: '101' } } }];
+  const paused = await agent.execute({ goal: 'Invoice #101. Amount: $750.00.', steps });
+  check(paused.paused && paused.status === 'WAITING_FOR_APPROVAL' && paused.executedTools.length === 0 && rt.runStore.getRun(paused.runId)?.phase === 'paused', 'a gated call pauses the bounded run: persisted, non-terminal, nothing executed');
+  rt.approvals.approve(paused.pendingApprovalId, { resolvedBy: 'verify-runtime' });
+  const resumed = await agent.execute({ goal: 'Invoice #101. Amount: $750.00.', steps, approvalId: paused.pendingApprovalId });
+  check(resumed.status === 'COMPLETED' && resumed.executedTools.join() === 'request_human_approval', 'resuming with the granted approval runs the gated call exactly as approved');
+}
 
 console.log(notes.join('\n'));
 console.log('');

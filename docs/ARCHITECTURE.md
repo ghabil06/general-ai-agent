@@ -5,6 +5,11 @@ does today, maps it onto the target agent architecture, and states exactly which
 parts of the new `src/` runtime are real implementations, adapters, mocks or
 placeholders.
 
+**Later calls:** §7 is call 2 (planning, context, memory, evaluation), §8 is call 3
+(HTTP API, console, gap list), and §9 is call 4 (the bounded tool-calling state machine
+for general-purpose agents, and the defects found in the shared runtime on the way).
+Where a later section corrects an earlier statement, the earlier one is annotated in place.
+
 Everything in this document was written by reading the files it cites. Where a
 claim is about behaviour, the symbol is named so it can be checked.
 
@@ -390,6 +395,10 @@ step that somehow appeared would be `DENY` there.
 
 **Three ceilings, all enforced:** `maxReplans` (3), `maxStepAttempts` (2) and
 `maxSteps` (12) in the planner; the run's iteration budget in the loop.
+*(Call 4 correction: `maxReplans` and `maxSteps` are enforced bounds; `maxStepAttempts`
+is carried and reported but is not an independent bound — a failed step is never re-run
+in place, so its attempt counter never exceeds 1. See §9.7. All three are now also held
+under hard ceilings — §9.4.)*
 
 **Wired into the loop** (`src/runtime/run.mjs`): `loop({ mode: 'planned', plan | steps | goal })`
 plans if it must, executes each step through `runTool()`, observes, validates and
@@ -471,12 +480,20 @@ a `PromptRenderError` carrying a stable code — when:
 - the template has no placeholder (`PLACEHOLDER_MISSING`),
 - a value is absent, `null`, empty, or an empty object/array (`PLACEHOLDER_VALUE_EMPTY`),
 - a `{{…}}` survives the substitution (`PLACEHOLDER_UNRESOLVED`),
-- the path escapes `prompts/` (`PROMPT_PATH_ESCAPE`),
+- the path escapes `prompts/` (`PROMPT_PATH_ESCAPE`) — including a Windows-rooted path
+  (`C:/x`, `C:\x`, `\\server\share`, `\x`), which is refused on **every** host, not only
+  on Windows,
 - the file is missing or unreadable (`PROMPT_NOT_FOUND`, `PROMPT_READ_FAILED`).
 
 The prompt files are read, never written (`tests/unit/prompts-render.test.mjs`
-pins the bytes before and after a render). A prompt that carries no data (the
-SVC_03 guardrail) is `load()`ed, not rendered.
+pins the bytes before and after a render). Template-path containment — traversal,
+absolute paths outside `prompts/`, sibling-prefix names, Windows-rooted paths, and that a
+refused path never reaches the file reader — is pinned by
+`tests/unit/prompts-path-containment.test.mjs`. The check is **lexical** (`path.resolve`
++ `path.relative`): it does not resolve symlinks, so a symlink inside `prompts/` that
+points elsewhere would be followed (none exists in the repository; follow-up in
+`docs/HANDOVER.md` §10 item 15). A prompt that carries no data (the SVC_03 guardrail) is
+`load()`ed, not rendered.
 
 ### 7.5 Agent profiles — `src/agents/`, `src/config/agents.mjs`
 
@@ -639,6 +656,12 @@ produced by `createBudgetTracker().check()`, and both say so in the module).
    flight, because a plain JS function cannot be cancelled. `runTool()` still does
    not thread an `AbortSignal` from the run into the executor, so a long tool call
    runs to its timeout.
+   *(Superseded in call 4, §9.5: a MODEL call in flight is now abandoned the moment the
+   run is cancelled or its wall-clock runs out, and the provider receives an abort
+   signal. A TOOL call in flight is still not interrupted — it finishes, is recorded and
+   nothing after it runs — but `runTool()` now passes the run's signal to the executor
+   and never gives a tool longer than the run has left. Before call 4 a cancel that
+   landed during a model call made `loop()` reject and the run was never recorded.)*
 9. **Live model paths remain unverified in this environment.** No API key is
    configured, so the OpenAI/Anthropic adapters have still only run against an
    injected `fetch`. Every offline result here is evidence about the runtime, the
@@ -667,6 +690,9 @@ produced by `createBudgetTracker().check()`, and both say so in the module).
     `maxReplans` and `maxStepAttempts` can be set per run
     (`createAgentRun({ planning })`) or per planner, but not declaratively in
     `src/config/agents.mjs`. Adding them there is a small, obvious change.
+    *(Call 4: still true of the shipped profiles, but the envelope reads them from a
+    profile's `limits` if present (§9.4), and they can no longer be raised past a hard
+    ceiling by a request, the API or configuration.)*
 16. **`run.memory.list()` does not emit `memory.retrieved`.** It is the inspection
     read; only `recall()` claims a retrieval. Documented in `src/memory/kinds.mjs`
     and pinned by test.
@@ -851,3 +877,252 @@ Still open, in priority order:
 9. **No browser render verification of the console** in this call (no browser
    backend was available). The structure is asserted by test; a human should
    still open `/console` once.
+
+---
+
+## 9. Call 4 — the bounded tool-calling state machine (General AI Agents)
+
+**The request** ("SVC_03 — General AI Agents"): *algorithm: bounded tool-calling
+state machine. Reuse the existing runtime's planning, tool allowlists, execution
+budgets, policy checks, approval gates and persisted traces. Use a deterministic
+state machine for transitions and bounded model-driven planning for flexible
+tasks. Do not use open-ended agent loops without execution limits.*
+
+### 9.1 Scope, and a naming collision to resolve
+
+In this repository `svc_03` is the **accounts-payable invoice agent**, whose frozen
+$500.00 boundary this call does not touch. The general-purpose agent is `general`
+(`taskType: general_assistance`). This call therefore builds a bounded execution
+path for *general-purpose* agents on the shared runtime, and makes it
+agent-agnostic: it runs `general` by default and any other profile — `svc_03`
+included — when asked. That reading was chosen, not confirmed; if "SVC_03" meant
+something else, nothing here is wasted, and the one thing to change is the default
+agent id (`createBoundedAgent({ agentId })`).
+
+### 9.2 The algorithm
+
+The model **proposes**; deterministic code **disposes**.
+
+| The model proposes… | …and code decides |
+| --- | --- |
+| a plan, for a flexible task | whether it is a plan at all (the planner validates every step against the registry and the agent's allowlist, and caps steps and replans) |
+| a tool call | whether it may run: schema → policy kernel → approval gate → budget → timeout, in the executor, which is the only path to a side effect |
+| a final answer | nothing: it is data, and it ends the run only if the machine is in a state that can end |
+| — | the next state: a guarded 13-state table; `VALIDATING → COMPLETED` needs `valid`, `WAITING_FOR_APPROVAL → EXECUTING` needs an approval |
+| — | whether the run may continue: budgets, loop detection, transition fuel, wall-clock deadlines, cancellation |
+
+```
+ request ─validate─▶ ENVELOPE ─▶ createRun ─▶ run.loop(mode) ─▶ settle ─▶ result
+    │ invalid: throws    │ every bound            │ model proposes,    │ paused at an approval gate
+    │ BoundedAgentError  │ resolved once          │ code disposes      │ OR finished: ONE persisted
+    ▼ (nothing created)  ▼                        ▼                    ▼ record + trace + audit row
+```
+
+**Strategy** is a function of the request and the profile, never of anything the
+model said: `direct` (the model chooses each call — `mode:'model'`), `planned` (the
+goal becomes a plan first — `mode:'planned'`; supplied by the caller it is fully
+deterministic and the model only summarises, proposed by the model it is bounded
+model-driven planning), and `auto` (the default): planned if steps were supplied or
+the agent holds tools, direct otherwise.
+
+### 9.3 What is reused, and what is added
+
+| Brief | Reused as-is | Added |
+| --- | --- | --- |
+| planning | `createPlanner`, `stepsFromProposal`, the planned loop | bounded plan-proposal and replan gates; tolerant extraction of a plan from fenced / prose-wrapped model output (§9.5 #7) |
+| tool allowlists | the agent profile, enforced by the planner **and** the policy kernel | — |
+| execution budgets | `createBudgetTracker`, loop detection | the envelope: hard ceilings and one resolution point (§9.4); a deadline on every in-flight wait |
+| policy checks | `createPolicyKernel` via the executor | — (a test pins that the $500.00 / $500.01 SVC_03 boundary still decides through the new path) |
+| approval gates | `createApprovalManager`, `run.pause()`, the `approvalId` resume path | — |
+| persisted traces | `run.finish()` / `run.pause()`, the event sinks | the guarantee that **every created run is closed and recorded**, including on a fault, a deadline and an abort |
+| state machine | the 13-state guarded table | **transition fuel**: after N moves only a terminal move remains |
+| — | — | `createBoundedAgent().execute(task)`: one entry point and one result shape, where the orchestration used to live inside the HTTP handler |
+
+New files: `src/runtime/envelope.mjs`, `src/runtime/bounded-agent.mjs`. No new
+dependency, nothing under `evals/`, `prompts/`, `n8n_exports/`, `promptfooconfig*.yaml`
+or the datasets, no change to a boundary, a policy rule or an approval rule.
+
+### 9.4 The envelope — "no way to ask for more"
+
+Before this call every limit was *a default someone could override*: `AGENT_MAX_ITERATIONS=1000000000`,
+a programmatic `Infinity`, or `planning: { maxSteps: 1e9 }` were all honoured. A
+value can now only go **down** through the layers, and nothing is above the top one:
+
+```
+HARD_CEILINGS (code constants)  >  runtime budgets (env)  >  profile limits  >  request limits
+```
+
+`resolveEnvelope()` (`src/runtime/envelope.mjs`) is pure, and it is the **only**
+thing `createAgentRun()` uses to size a run's budget tracker, planner and state
+machine — so the envelope a caller is shown (`run.envelope`, `result.envelope`,
+with the layer that bound each value) is the envelope that is enforced. Ceilings sit
+above every default and every shipped profile (a test pins both), so they bind only
+a misconfiguration.
+
+| Dimension | Default (`general`) | Hard ceiling | Enforced by |
+| --- | --- | --- | --- |
+| iterations | 8 | 50 | budget tracker, at the top of each turn **and** before the plan proposal and each replan |
+| tool calls | 12 | 100 | every *attempt* is charged in `runTool` (a call that fails validation, names an unknown tool or is refused still counts), then the budget tracker + `run.rate_limit` before each executed call |
+| tokens | 60 000 | 500 000 | budget tracker, between turns (a completion with no `usage` is charged an estimate) |
+| wall clock | 120 000 ms | 600 000 ms | budget tracker between turns, **and** a deadline on every in-flight model call and tool call |
+| identical calls / same tool | 3 / 12 | 10 / 100 | budget tracker, per call |
+| plan size | 12 steps | 25 | planner, at validation |
+| replans | 3 | 5 | planner, at each failure |
+| state-machine transitions | 8 × iterations + 16 = 80 | 416 | the machine itself: after N moves only a terminal move remains |
+
+The transition fuel is a second, independent bound behind the iteration budget: the
+guarded table has cycles and says nothing about how many moves a run may make, so a
+loop path that forgot to count an iteration could otherwise cycle it forever.
+`FAILED` is reachable from every non-terminal state (a test pins that), so spent fuel
+can never strand a run, and `TRANSITIONS_PER_ITERATION = 8` is **checked against the
+real loops by a test**, not assumed: the heaviest iteration derived by hand is 6
+moves, and the worst *measured* across a runaway model, a plan whose every step fails
+and is replanned, parallel tool calls and a normal task is **4.3 per iteration**,
+with at least 46 of the 80 moves to spare.
+
+A request may tighten any budget for one run (`limits`) and move a planner ceiling
+(`planning`). Above a hard ceiling it is refused with a typed error naming the
+ceiling; above the profile's own value it is accepted, reported as `clamped`, and not
+honoured.
+
+### 9.5 Defects found in the shared runtime, and fixed
+
+Found by probing the runtime before building on it. Each was reproduced against
+commit `edaebc6` and each has a regression test written to fail there first.
+
+| # | Defect | Before (measured) | After (measured) |
+| --- | --- | --- | --- |
+| 1 | The planned loop did not gate the plan proposal or a replan, so it exceeded the iteration budget and made a model call after the budget was spent | `maxIterations` 1, 3, 5 recorded **2, 4, 6** iterations; at 1 it made a model call | recorded = `maxIterations` at every value; **0** model calls at 1 |
+| 2 | `cancel()` while a model call was in flight made `loop()` **reject** (`StateTransitionError: CANCELLED -> OBSERVING`); no run row, no trace. Through the HTTP API, `POST /runs/:id/cancel` on a live run left `start()` throwing | rejected; `persistedRow=false`, `traceRow=false` | `loop()` resolves `CANCELLATION_REQUESTED`; the run is recorded `CANCELLED`; a cancel interrupts a 1 500 ms model call in **42 ms** |
+| 3 | Wall-clock was read only *between* iterations | a 1 500 ms model call against a 200 ms budget returned after **1 506 ms** and COMPLETED | stops after **199 ms** with `WALL_CLOCK_TIMEOUT` |
+| 4 | A provider that never resolves hung the run — and, behind the API's one-at-a-time run queue, every later run | still hung after 3 000 ms against a 200 ms budget | stopped at the deadline; the abort signal handed to the provider fires |
+| 5 | Planner ceilings were whatever the caller said, and a non-number silently disabled them | the API returned 201 for `maxSteps: 1000000000`; `maxSteps: NaN` accepted a 40-step plan | clamped to the ceiling; the API returns 400; `createAgentRun` refuses a non-integer (`EnvelopeError`) |
+| 6 | A free-form plan step carrying two tool calls (parallel tool calls) failed the whole run *after both tools had executed*, with a misleading `MODEL_ERROR` | `OBSERVING -> OBSERVING rejected (SELF_TRANSITION)`, state FAILED | completes |
+| 7 | The planner could not parse a plan that a model fenced in markdown or wrapped in a sentence — the usual shape of real output | 3 of 5 realistic shapes **not parsed** (`NO_STEPS`) | 5 of 5. Parsing is lenient; *authorisation* is not: whatever is found still goes through `planner.plan()` (a test pins that an unauthorised tool in a fenced plan is refused) |
+| 8 | The rate-limit rule counted the call it was judging, because the run pushed the call into the history first | `maxToolCalls` = N executed **N − 1** calls (N = 1 executed none) | N executes N, then the budget stops the run |
+| 9 | A completion with no `usage` recorded zero tokens, so the token budget could not bind | not bound | an estimate is charged (a *reported* zero is taken at its word: that is what the test double says) |
+| 10 | The tool-call budget was charged only *after* schema validation and policy, so calls that fail validation (or name an unknown tool) were never counted. One completion carrying thousands of invalid calls was processed in full | one completion of 5 000 invalid calls: **10 000 attempts recorded** across 2 turns, budget counted **0**, 1 346 ms, stopped only by the iteration budget | cut off at **13** recorded attempts (12 allowed + the refused one), in the first turn, 51 ms, stop `TOOL_CALL_BUDGET_EXCEEDED`; the free-form plan step now stops on a budget refusal as the other loops do |
+
+Also: a fault that escapes a loop *after the run has started* used to leave events on
+disk and no run record. `loop()` now turns it into a `run.error` event, a FAILED
+machine and an `INTERNAL_ERROR` / `TRANSITION_LIMIT` stop reason, so the caller's
+`finish()` records it. A fault *before* the run has started (a caller error) is still
+thrown, as it always was.
+
+### 9.6 Behaviour changes to earlier calls (so any of them can be vetoed)
+
+1. **#8 loosens an effective cap by one**: a profile's `maxToolCalls: 12` used to
+   execute 11 calls and now executes 12, which is what `budgets.mjs` documents. It is
+   the only change that makes a limit *larger*. Everything else only tightens or
+   refuses.
+2. **#10 tightens**: attempts that fail validation or are refused now consume
+   `maxToolCalls` too. A run that mixes failed and valid calls stops earlier than
+   before (a run of only valid calls is unchanged). No existing test relied on the old
+   accounting.
+3. Configured limits above the hard ceilings are clamped. No shipped default or
+   profile is above one.
+4. `POST /agents/:id/runs` rejects a `planning.*` value above its ceiling (400).
+   It used to accept any positive integer.
+5. `loop()` contains a mid-run fault instead of rejecting (caller errors still throw).
+6. A model call in flight is abandoned on cancel or deadline (was: waited for).
+7. Runtime version stays `0.2.0` (a test pins it), so this is not visible in `/health`.
+
+### 9.7 Interfaces
+
+```js
+import { createRuntime } from './src/index.mjs';
+
+const runtime = createRuntime({ mockScript: [/* a test double: only for offline runs */] });
+const agent = runtime.boundedAgent();                  // default agent: 'general'
+
+const result = await agent.execute({
+  goal: 'Report the AAPL quote and the paper portfolio state.',
+  strategy: 'auto',                    // 'auto' | 'planned' | 'direct'
+  steps: [/* optional: a caller-supplied plan => deterministic */],
+  limits: { maxIterations: 6, wallClockMs: 30_000 },  // may only tighten; <= HARD_CEILINGS
+  planning: { maxSteps: 6, maxReplans: 1 },
+  provider: undefined,                 // default: the configured provider; never silently a mock
+  approvalId: undefined,               // resume a gated call with a granted approval
+  evidence: undefined,                 // structured facts for the policy rules — YOUR system of record
+  untrusted: undefined,                // attacker-controllable text, for the injection rule
+  signal: undefined,                   // an AbortSignal: abort => the run is CANCELLED and recorded
+});
+```
+
+`execute()` throws **only** `BoundedAgentError`, for exactly two reasons: a request refused
+before a run exists (nothing is persisted for it), or `PERSISTENCE_FAILED` — the run finished
+but could not be *written* (an unwritable store), so there is nothing true left to return and
+the error carries the run id and state. Everything else is a result:
+
+| Field | Meaning |
+| --- | --- |
+| `ok`, `status`, `terminal`, `paused` | `ok` ⇔ the bounded run COMPLETED. It says nothing about whether a *proposed action* was permitted — read `policyDecision`. A paused run reports its non-terminal state |
+| `answer` | the final text, only when COMPLETED |
+| `stopReason` | `{code, message, limit, observed, …}`: a budget, `WALL_CLOCK_TIMEOUT`, `TRANSITION_LIMIT`, `CANCELLATION_REQUESTED`, `PLAN_*`, `INTERNAL_ERROR`, … |
+| `blocked`, `policy` | what the kernel refused and under which rule |
+| `pendingApprovalId` | present when paused at a gate |
+| `plan`, `steps`, `executedTools`, `toolCalls` | what was planned, ledgered and actually executed |
+| `usage`, `envelope`, `stateHistory` | what was consumed, what bound it, the path the machine took |
+| `provider`, `notice` | `provider.mock` and a notice when the proposals came from a test double |
+| `record` | the persisted run row, as written |
+
+### 9.8 Known limitations of this call
+
+1. **No live model was exercised.** No key in this environment. With `provider:'mock'`
+   the proposals come from a script; every result says so (`provider.mock`, `notice`).
+   Every adversarial provider in the tests (runaway, never-answers, corrupt) is a test
+   double: it proves the *runtime* stops, not how a model behaves. The plan-fence
+   parsing (#7) is verified against fixed strings, not against real model output.
+2. **A tool already running is not interrupted** by a cancel or a deadline. It finishes
+   (at most its clamped timeout), is recorded, and nothing after it runs.
+3. **A granted approval is bound to the tool and its arguments but is not single-use.**
+   Replaying the same `approvalId` with the same arguments executes the call again
+   until the approval expires (24 h by default). **Pre-existing** (`src/policy/approvals.mjs`,
+   `src/tools/executor.mjs`) and deliberately not changed here — making approvals
+   single-use is an approval-design decision with its own test surface. Found while
+   writing the resume test; flagged because it matters for any write tool.
+4. **`maxStepAttempts` is inert.** `attempts` increments once, when a step starts, and a
+   failed step is terminal, so no path can reach the ceiling (a test pins `attempts <= 1`).
+   A failed step is retried only by a replan, which `maxReplans` bounds.
+5. **The general agent has no route-table entry** for `general_assistance`, so the
+   router only reaches a live model for it when a provider is *forced* (the HTTP API and
+   `execute()` both force the configured provider). A library caller using
+   `runtime.createRun()` without `provider` and a live default gets `PROVIDER_UNAVAILABLE`
+   (checked with both providers configured: the three SVC task types route to
+   `openai:gpt-4o-mini`; `general_assistance` is "not served" by any route). The fix is a
+   route-table entry plus a `ROUTER_TABLE_VERSION` bump. It was not made here because
+   `tests/unit/runtime-loop.test.mjs` pins the table at 8 routes, and because choosing which
+   model serves general tasks, and at what cost/latency score, is a product decision.
+6. **Plan extraction can be hidden by an unbalanced opening brace** earlier in the
+   prose (`Use { carefully. {"steps": …}`). The scan is one linear pass and does not
+   backtrack, on purpose.
+7. **The mock provider is one shared double**; do not run two `execute()` calls
+   against it concurrently (the HTTP API serialises its runs for this reason).
+   More generally `execute()` bounds *one run*; it does not limit how many runs a
+   caller starts.
+8. **The token budget is charged after each call**, from the provider's usage report
+   (or an estimate when it reports none). The context manager bounds the *initial*
+   window, but a tool result is appended to the transcript as it came, so a single
+   oversized prompt is sent before the budget can refuse the call that follows. For a
+   paid provider that is a cost, not an unbounded loop; the built-in tools return small
+   fixtures. A pre-call guard ("this prompt alone exceeds the remaining budget") would
+   close it and was left out because it changes when existing token-budget stops fire.
+9. **`execute()` is a library entry point, not an HTTP endpoint.** The existing
+   `POST /agents/:id/runs` path gets the runtime hardening above (cancel, deadlines,
+   ceilings) but is otherwise unchanged and still uses its own orchestration.
+10. **`createPlanner()` itself still does not validate its options** (call-2 behaviour);
+   `createAgentRun()` is the guarded path.
+11. **Resolved in batch B1 — `tests/unit/prompts-render.test.mjs` "a path outside
+    prompts/ is refused" used to fail on POSIX.** It feeds a Windows path
+    (`C:/Windows/…`) that POSIX does not treat as absolute, so the path resolved to a
+    missing file *inside* `prompts/` and gave `PROMPT_NOT_FOUND` instead of
+    `PROMPT_PATH_ESCAPE`. `resolveTemplate()` now refuses a Windows-rooted path on every
+    host (a short guard; the containment check and the error codes are unchanged), and
+    the test is unmodified and passes. What B1 left for later: `docs/HANDOVER.md` §10
+    item 15.
+
+### 9.9 Verification
+
+`npm run test:bounded` (88 tests), `npm run verify:runtime` (84 → 103 checks, the new
+ones in §13 of the script) and the unchanged `npm test` / `test:integration` /
+`eval:runtime` gates. Numbers and commands: `docs/VERIFICATION.md` §6.

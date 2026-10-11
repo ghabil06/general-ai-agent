@@ -18,10 +18,11 @@ account, with no real-money routing path anywhere.
 - `prompts/svc_01/` — reserved for future marketing-agent prompts.
 - `n8n_exports/` — importable n8n workflow for SVC_03 (dynamic prompt fetch, deterministic guardrail, shadow-mode audit log). See `n8n_exports/README.md`.
 - `src/` — the agent runtime: state machine, budgets, model router and providers, tool registry and executor, a policy kernel with the SVC boundaries as code, approvals, JSONL stores, events/traces/audit and memory. See `docs/ARCHITECTURE.md`.
+- `src/runtime/bounded-agent.mjs`, `src/runtime/envelope.mjs` — the bounded tool-calling state machine for general-purpose agents (`runtime.boundedAgent().execute(task)`) and the execution envelope (hard ceilings) it runs inside. See "Bounded general agents" below.
 - `src/api/` — the runtime HTTP API as a library (router, handlers, response projections, the offline fixture layer). Mounted by `server.mjs` behind `/api/runtime`.
 - `public/` — `index.html`/`app.js`/`style.css` are the original animated dashboard; `runtime.html`/`runtime.js`/`runtime.css` are the operator console served at `/console`.
 - `docs/ARCHITECTURE.md` — repository audit (what is real, simulated, configuration-only or missing) and the target architecture map.
-- `docs/GOAL.md`, `docs/HANDOVER.md`, `docs/VERIFICATION.md` — the call-3 goal and acceptance criteria, the handover, and the verification report.
+- `docs/GOAL.md`, `docs/HANDOVER.md`, `docs/VERIFICATION.md` — the goals and acceptance criteria (calls 3 and 4), the handover, and the verification reports.
 - `server.mjs` — the single HTTP entry point: the dashboard, the legacy simulation and the runtime API.
 - `data/fixtures/` — hand-authored fixtures derived from the eval datasets, each with a provenance block. `data/state/` holds runtime artefacts and is not committed.
 
@@ -39,6 +40,17 @@ npm run verify:runtime     # builds a runtime, runs a full agent run, 32 invaria
 > date. The current numbers are unit **333**, integration **81**, API **27**,
 > `verify:runtime` **84 checks**, `eval:runtime` **all gates passed** — measured
 > on Node v22.22.0 and recorded in `docs/VERIFICATION.md`.
+>
+> **Note (call 4):** now unit **388** (one pre-existing failure on POSIX — fixed in
+> batch B1, see the next note), integration **114**, `verify:runtime` **103 checks**,
+> `eval:runtime` unchanged. `npm run test:bounded` runs the 88 bounded-execution tests
+> on their own.
+>
+> **Note (batch B1):** unit **398**, all passing on POSIX — the one pre-existing failure
+> is fixed. A Windows-rooted prompt template path (`C:/x`, `C:\x`, `\\server\share`, `\x`)
+> is now refused with `PROMPT_PATH_ESCAPE` on **every** host, not only on Windows;
+> `tests/unit/prompts-path-containment.test.mjs` pins it. See `docs/ARCHITECTURE.md` §7.4
+> and `docs/VERIFICATION.md` §7.
 
 ## Runtime API and operator console (call 3)
 
@@ -91,6 +103,48 @@ Documentation:
   with the exact commands and the observed output.
 - `docs/ARCHITECTURE.md` — the architecture audit, the runtime reference, and
   the "Call 3" section with the final gap list.
+
+## Bounded general agents (call 4)
+
+A general-purpose agent runs as a **bounded tool-calling state machine**: the model
+proposes (a plan, a tool call, an answer) and deterministic code decides everything
+else — the next state, whether a tool may run, whether the run may go on, how it ends.
+It reuses the runtime's planner, tool allowlists, budgets, policy kernel, approval
+gates and persisted traces; it adds no second loop.
+
+```js
+import { createRuntime } from './src/index.mjs';
+
+// Offline the provider is a deterministic TEST DOUBLE that replays these proposals.
+// With no script it has nothing to replay, and the run fails with PROVIDER_UNAVAILABLE.
+const runtime = createRuntime({
+  mockScript: [
+    { text: JSON.stringify({ steps: [{ id: 's1', description: 'Get the AAPL quote', tool: 'get_market_quote', args: { ticker: 'AAPL' } }] }) },
+    { text: 'AAPL quoted; summarised.' },
+  ],
+});
+const result = await runtime.boundedAgent().execute({
+  goal: 'Report the AAPL quote.',
+  limits: { maxIterations: 6, wallClockMs: 30_000 }, // a request may only tighten a limit
+});
+// result.ok · result.status · result.answer · result.stopReason · result.envelope · result.record
+```
+
+- **No unbounded loop.** Every dimension has a hard ceiling in code that no environment
+  variable, profile, request or API call can raise; every model and tool wait is raced
+  against the run's remaining wall-clock; the state machine itself refuses a non-terminal
+  move after N transitions; cancelling abandons a model call in flight.
+- **Every run is recorded** — run row, trace tree and audit row — whether it completed,
+  was blocked by policy, paused at an approval gate, hit a budget, timed out, was
+  cancelled or hit an internal fault.
+- **Honest about what it is not:** with the default provider the *proposals* come from a
+  script, and the result says so (`provider.mock`, `notice`). No live model has been run
+  from this environment.
+- In this repository `svc_03` is the invoice agent; the general-purpose agent is
+  `general`. `execute` runs `general` by default and any other profile on request.
+
+Design, guarantees, the defects found in the shared runtime on the way, and the known
+limitations: `docs/ARCHITECTURE.md` §9. Numbers and commands: `docs/VERIFICATION.md` §6.
 
 ## Evaluate before you deploy
 

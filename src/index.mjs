@@ -49,6 +49,8 @@ import { redact } from './observability/redact.mjs';
 import { createMemoryStore, MEMORY_SCOPES } from './memory/store.mjs';
 import { createKindedMemory, MEMORY_KIND, MEMORY_KINDS, RETRIEVAL_MODEL } from './memory/kinds.mjs';
 import { createAgentRun } from './runtime/run.mjs';
+import { createBoundedAgent, BoundedAgentError, BOUNDED_ERROR_CODES, STRATEGIES } from './runtime/bounded-agent.mjs';
+import { HARD_CEILINGS, resolveEnvelope } from './runtime/envelope.mjs';
 import { createBudgetTracker, STOP_REASONS } from './runtime/budgets.mjs';
 import { createStateMachine, STATES, TRANSITIONS, canTransition } from './runtime/state-machine.mjs';
 import { createPlanner, STEP_STATUS, PLAN_STATUS, PlanError } from './planning/planner.mjs';
@@ -203,6 +205,14 @@ export function createRuntime({
     return route({ preference: config.providers.preference, allowTestDoubles, ...request }, { providers, now });
   }
 
+  /**
+   * The General AI Agents entry point (call 4): `execute(task)` runs one bounded
+   * tool-calling task to a persisted result. See `src/runtime/bounded-agent.mjs`.
+   */
+  function boundedAgent(options = {}) {
+    return createBoundedAgent({ runtime: api, ...options });
+  }
+
   /** Start one run. The executor, policy kernel and stores are shared. */
   function createRun(options = {}) {
     const run = createAgentRun({ ...options, runtime: api, provider: options.provider ?? null });
@@ -254,6 +264,9 @@ export function createRuntime({
     routes: ROUTES,
     describeRoutes,
 
+    // bounded execution (call 4)
+    boundedAgent,
+
     // helpers callers will use next
     newEventBus: (options = {}) =>
       createEventBus({ sinks: eventSinks, now, ...options }),
@@ -294,6 +307,13 @@ export function createRuntime({
 
 // ── re-exports so consumers do not have to reach into internal paths ────────
 export {
+  // bounded execution (call 4)
+  createBoundedAgent,
+  BoundedAgentError,
+  BOUNDED_ERROR_CODES,
+  STRATEGIES,
+  HARD_CEILINGS,
+  resolveEnvelope,
   // config
   loadConfig,
   AGENT_PROFILES,
